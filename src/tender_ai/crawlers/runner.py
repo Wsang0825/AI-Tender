@@ -165,12 +165,12 @@ def _upsert_discovered_domain(session: Any, url: str, source_level: str | None, 
 
 def _health_reason(error: BaseException) -> str:
     message = str(error).casefold()
+    if any(token in message for token in ("验证码", "captcha")):
+        return "CAPTCHA"
     if isinstance(error, HttpFetchError):
         if error.status_code in {403, 429} or "rate" in message:
             return "RATE_LIMITED"
         return "HTTP_ERROR"
-    if any(token in message for token in ("验证码", "captcha")):
-        return "CAPTCHA"
     if any(token in message for token in ("selector", "解析", "json")):
         return "PARSER_ERROR"
     return "HTTP_ERROR"
@@ -354,14 +354,14 @@ class CrawlRunner:
 
     @staticmethod
     def _query_terms(profile: SearchProfile) -> tuple[str, ...]:
+        terms = list(profile.include_keywords)
         try:
             catalog = load_industry_profiles()
-            terms = list(catalog.terms_for(profile.industry_groups))
+            terms.extend(catalog.terms_for(profile.industry_groups))
         except Exception:
-            terms = []
-        terms.extend(profile.include_keywords)
+            pass
         terms = [item for item in dict.fromkeys(terms) if item and item not in profile.exclude_keywords]
-        return tuple(terms[:12] or DEFAULT_QUERY_TERMS)
+        return tuple(terms[:6] or DEFAULT_QUERY_TERMS)
 
     def run(
         self,
@@ -401,7 +401,7 @@ class CrawlRunner:
                     adapter = build_adapter(definition)
                     actual_pages = min(definition.max_pages, max_pages) if max_pages else definition.max_pages
                     cutoff = now_shanghai() - timedelta(days=effective_since_days)
-                    if source_row and source_row.last_success_at:
+                    if source_row and source_row.last_success_at and since_days is None:
                         cutoff = max(cutoff, as_shanghai(source_row.last_success_at) - timedelta(days=1))
                     seen_urls: set[str] = set()
                     item_budget = max(1, max_items)

@@ -6,7 +6,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from html import unescape
+from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlparse, urlsplit, urlunsplit
 
 from tender_ai.cache import DiskCache
 from tender_ai.config_loader import APP_ROOT
@@ -68,11 +69,33 @@ def download_attachment(
                 size=int(previous.get("size", 0)),
             )
     response = client.get(url, cache_namespace="attachment-http", cache_expire=86400)
+    # 部分公共资源平台把下载地址实现为“GET 一个自动提交表单，再 POST action”。
+    # 先按公开页面给出的 action 重放，不启动浏览器，也不猜测接口。
+    content_type = (response.headers.get("content-type") or "").lower()
+    prefix = response.content[:512].lstrip().lower()
+    if content_type.startswith("text/html") or prefix.startswith((b"<!doctype html", b"<html", b"<head")):
+        action_match = re.search(r"form\.action\s*=\s*[\"']([^\"']+)", response.text, re.I)
+        if action_match and "download" in action_match.group(1).lower():
+            action = unescape(action_match.group(1))
+            original_parts = urlsplit(url)
+            action_parts = urlsplit(urljoin(url, action))
+            original_params = dict(parse_qsl(original_parts.query, keep_blank_values=True))
+            action_params = parse_qsl(action_parts.query, keep_blank_values=True)
+            merged_params = []
+            used_keys = set()
+            for key, value in action_params:
+                merged_params.append((key, value or original_params.get(key, "")))
+                used_keys.add(key)
+            merged_params.extend((key, value) for key, value in original_params.items() if key not in used_keys)
+            action_url = urlunsplit((action_parts.scheme, action_parts.netloc, action_parts.path, urlencode(merged_params), ""))
+            response = client.request("POST", action_url, data={}, headers={"Referer": url}, cache_namespace="attachment-action", cache_expire=86400)
     if len(response.content) > max_bytes:
         raise ValueError(f"附件超过大小限制 {max_bytes} bytes: {url}")
     content_type = (response.headers.get("content-type") or "").lower()
     prefix = response.content[:512].lstrip().lower()
     if content_type.startswith("text/html") or prefix.startswith((b"<!doctype html", b"<html", b"<head")):
+        if "validateVerificationCode" in response.text or "验证码" in response.text:
+            raise ValueError("CAPTCHA: attachment download requires platform verification")
         raise ValueError("attachment response is HTML, not a document")
     digest = sha256_bytes(response.content)
     original_name = _name_from_response(url, response.headers, suggested_name)
