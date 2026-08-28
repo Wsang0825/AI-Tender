@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} · 区域新能源招投标</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="/">
+        <span class="brand-mark">AE</span>
+        <span><strong>区域新能源</strong><small>Evidence Console</small></span>
+      </a>
+      <div class="rail-label">WORKSPACE</div>
+      <nav class="nav">
+        <a class="{% if request.url.path == '/' %}active{% endif %}" href="/"><span>⌂</span>总览</a>
+        <a class="{% if request.url.path.startswith('/projects') %}active{% endif %}" href="/projects"><span>◈</span>项目库</a>
+        <a href="/projects?view=today-new"><span>✦</span>今天新增</a>
+        <a href="/projects?view=today-changed"><span>↗</span>今天变化</a>
+        <a href="/projects?view=reopened"><span>↻</span>延期重开</a>
+        <a href="/projects?status=UNKNOWN"><span>?</span>待确认</a>
+        <a href="/projects?view=favorite"><span>☆</span>我的关注</a>
+        <a href="/projects?view=ignored"><span>−</span>已忽略</a>
+        <a class="{% if request.url.path.startswith('/review') %}active{% endif %}" href="/review"><span>!</span>错误 / 待处理</a>
+        <div class="rail-label">OPERATIONS</div>
+        <a class="{% if request.url.path.startswith('/search') %}active{% endif %}" href="/search"><span>⌕</span>按需搜索</a>
+        <a class="{% if request.url.path.startswith('/sessions') %}active{% endif %}" href="/sessions"><span>▤</span>搜索历史</a>
+        <a class="{% if request.url.path.startswith('/sources') %}active{% endif %}" href="/sources"><span>◎</span>数据源</a>
+        <a href="/discovered-sources"><span>◇</span>新发现来源</a>
+        <a class="{% if request.url.path.startswith('/settings') %}active{% endif %}" href="/settings"><span>⚙</span>搜索设置</a>
+        <a class="{% if request.url.path.startswith('/system') %}active{% endif %}" href="/system"><span>⌁</span>系统状态</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="live-dot"></span>
+        <div><b>ON-DEMAND ONLY</b><small>不会自动扫描 · 不调用 AI API</small></div>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div><span class="eyebrow">LOCAL / {{ now|dt }}</span><h1>{{ title }}</h1></div>
+        <div class="top-actions"><a class="button button-primary" href="/search">＋ 新搜索</a><a class="icon-button" href="/system" title="系统状态">⌁</a></div>
+      </header>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

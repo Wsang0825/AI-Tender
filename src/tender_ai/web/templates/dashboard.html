@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero">
+  <div class="hero-card">
+    <span class="eyebrow">REGIONAL RENEWABLE / SEARCH ON DEMAND</span>
+    <h2>把公开公告，变成可追溯的参与判断。</h2>
+    <p>Codex负责理解意图和阅读疑难原文，本地系统负责按需搜索、规则抽取、Evidence、状态机和历史留痕。</p>
+    <div class="hero-meta">NO SCHEDULER · NO AI API · EVIDENCE FIRST</div>
+  </div>
+  <div class="metric-grid">
+    <a class="metric mint" href="/projects?status=OPEN"><span class="label">OPEN / 当前可参与</span><div class="value">{{ counts.OPEN }}</div></a>
+    <a class="metric amber" href="/projects?status=UNKNOWN"><span class="label">UNKNOWN / 待确认</span><div class="value">{{ counts.UNKNOWN }}</div></a>
+    <a class="metric" href="/projects?view=today-new"><span class="label">TODAY / 新发现</span><div class="value">{{ projects|selectattr('lifecycle_state', 'equalto', 'NEW')|list|length }}</div></a>
+    <a class="metric" href="/projects?view=reopened"><span class="label">REOPENED / 延期重开</span><div class="value">{{ reopened }}</div></a>
+  </div>
+</section>
+
+<div class="section-head"><h2>最近更新的项目</h2><a href="/projects">查看项目库 →</a></div>
+<section class="panel table-wrap">
+  {% if projects %}
+  <table><thead><tr><th>状态</th><th>项目</th><th>地区</th><th>招标人</th><th>最近截止</th><th>来源</th></tr></thead><tbody>
+  {% for item in projects %}<tr>
+    <td><span class="status status-{{ item.status|lower }}">{{ item.status }}</span></td>
+    <td><a class="project-name" href="/projects/{{ item.project_id }}">{{ item.project_name or '未命名项目' }}</a><div class="subline">{{ item.status_reason or '状态原因未记录' }}{% if item.lifecycle_state in ['NEW','UPDATED','REOPENED'] %} · {{ item.lifecycle_state }}{% endif %}</div></td>
+    <td>{{ item.province or '—' }}<div class="subline">{{ item.city or item.county or '' }}</div></td>
+    <td>{{ item.owner or '—' }}</td>
+    <td>{% if item.registration_deadline %}报名 {{ item.registration_deadline|dt }}<br>{% endif %}{% if item.document_deadline %}文件 {{ item.document_deadline|dt }}<br>{% endif %}{{ item.bid_deadline|dt }}</td>
+    <td><span class="tag tag-accent">{{ item.source_level or '—' }}</span><div class="subline">{{ item.source_name or '—' }}</div></td>
+  </tr>{% endfor %}</tbody></table>
+  {% else %}<div class="empty-state"><div class="empty-glyph">∅</div><h2>还没有项目</h2><a class="button button-primary" href="/search">开始一次按需搜索</a></div>{% endif %}
+</section>
+
+<div class="section-head"><h2>最近搜索</h2><a href="/sessions">全部历史 →</a></div>
+<section class="panel stack">
+  {% for item in sessions %}<a class="session-card" href="/sessions/{{ item.session_id }}"><div><h3>{{ item.session_id }}</h3><p>{{ item.started_at|dt }} · {{ item.request.region or '按 Profile' }} · {{ item.request.industries|join(' / ') if item.request.industries else '默认行业' }}</p></div><div class="session-stats"><span><b>{{ item.open_count }}</b><small>OPEN</small></span><span><b>{{ item.unknown_count }}</b><small>UNKNOWN</small></span><span><b>{{ item.query_count }}</b><small>QUERIES</small></span></div></a>{% else %}<p class="muted small">尚无搜索历史。搜索由用户显式触发，不会后台自动运行。</p>{% endfor %}
+</section>
+{% endblock %}

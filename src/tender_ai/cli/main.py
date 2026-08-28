@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -29,6 +30,7 @@ from tender_ai.crawlers.runner import CrawlRunner
 from tender_ai.discovery.queries import generate_discovery_queries
 from tender_ai.discovery.runner import DiscoveryRunner
 from tender_ai.evidence.models import EvidenceRecord
+from tender_ai.export import export_search_session
 from tender_ai.extractors.runner import ExtractionRunner
 from tender_ai.matching.dedupe import normalize_identity
 from tender_ai.models import TenderRecord
@@ -66,6 +68,12 @@ from tender_ai.storage.repository import (
 )
 from tender_ai.verification.runner import VerificationRunner
 from tender_ai.versioning import STATUS_RULE_VERSION
+from tender_ai.templates import (
+    list_templates,
+    request_from_template,
+    save_template,
+    set_template_enabled,
+)
 
 
 def _configure_utf8_stdio() -> None:
@@ -172,7 +180,7 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
             "change_history", "crawl_runs", "crawl_errors", "discovered_sources", "search_queries", "snapshots",
             "time_field_metadata", "manual_overrides", "system_metadata", "document_parses", "timeline_events",
             "verification_tasks", "verification_results", "field_conflicts", "search_sessions", "search_session_projects",
-            "codex_review_items",
+            "codex_review_items", "search_templates",
         }
         missing = sorted(required_tables - table_names)
         checks.update({
@@ -185,8 +193,14 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
         with session_scope(engine) as session:
             checks["failed_sources"] = [row.source_id for row in session.scalars(select(Source).where(Source.runtime_status.in_(["DEGRADED", "NEEDS_ATTENTION"]))).all()]
             checks["suspect_zero_results_sources"] = [row.source_id for row in session.scalars(select(Source).where(Source.health_reason == "SUSPECT_ZERO_RESULTS")).all()]
-            latest_run = session.scalar(select(CrawlRun).order_by(CrawlRun.started_at.desc()))
-            checks["latest_crawl"] = {"run_id": latest_run.run_id, "status": latest_run.status, "started_at": _json_default(latest_run.started_at)} if latest_run else None
+            latest_run = session.scalar(select(CrawlRun).where(CrawlRun.finished_at.is_not(None)).order_by(CrawlRun.finished_at.desc()))
+            checks["latest_crawl"] = {
+                "run_id": latest_run.run_id,
+                "status": latest_run.status,
+                "started_at": _json_default(latest_run.started_at),
+                "finished_at": _json_default(latest_run.finished_at),
+                "complete": True,
+            } if latest_run else None
         if missing:
             errors.append("数据库缺少表: " + ", ".join(missing))
     except Exception as exc:
@@ -194,6 +208,8 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
 
     checks["AGENTS.md"] = (APP_ROOT / "AGENTS.md").exists()
     checks["CODEX_SEARCH_GUIDE.md"] = (APP_ROOT.parent / "CODEX_SEARCH_GUIDE.md").exists()
+    checks["web_app"] = (APP_ROOT / "src" / "tender_ai" / "web" / "app.py").exists()
+    checks["scheduling_mode"] = "ON_DEMAND_ONLY"
     checks["browser"] = {"browsers_dir": str(APP_ROOT.parent / "browsers"), "available": (APP_ROOT.parent / "browsers").exists()}
     checks["browser_profiles_root"] = str(APP_ROOT.parent / "data" / "browser_profiles")
     checks["network_client"] = "httpx" if _module_available("httpx") else "ERROR"
@@ -352,8 +368,14 @@ def replay(
 ) -> None:
     """优先从本地 Snapshot/附件离线重跑解析、Evidence 和状态。"""
 
-    del reextract, recalculate_status, rules_only
-    summary = ReplayRunner(database=database).run(announcement_id=announcement_id, source_id=source, dry_run=dry_run)
+    summary = ReplayRunner(database=database).run(
+        announcement_id=announcement_id,
+        source_id=source,
+        dry_run=dry_run,
+        reextract=reextract,
+        recalculate_status=recalculate_status,
+        rules_only=rules_only,
+    )
     typer.echo(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, default=_json_default))
 
 
@@ -373,6 +395,8 @@ def _request_from_options(
     keywords: list[str],
     exclude_keywords: list[str],
     source_level: str | None,
+    source_categories: list[str],
+    announcement_types: list[str],
     include_unknown: bool,
     only_open: bool,
     discovery_enabled: bool,
@@ -387,6 +411,10 @@ def _request_from_options(
         region=region or base.region,
         city=city or base.city,
         county=county or base.county,
+        regions=tuple(dict.fromkeys(([region] if region else list(base.regions)) or ([base.region] if base.region else []))),
+        region_codes=tuple(base.region_codes),
+        cities=tuple(dict.fromkeys(([city] if city else list(base.cities)) or ([base.city] if base.city else []))),
+        counties=tuple(dict.fromkeys(([county] if county else list(base.counties)) or ([base.county] if base.county else []))),
         days=days or base.days,
         date_from=date_from or base.date_from,
         date_to=date_to or base.date_to,
@@ -396,6 +424,8 @@ def _request_from_options(
         keywords=tuple(dict.fromkeys(keywords or base.keywords)),
         exclude_keywords=tuple(dict.fromkeys(exclude_keywords or base.exclude_keywords)),
         source_level=source_level or base.source_level,
+        source_categories=tuple(dict.fromkeys(source_categories or base.source_categories)),
+        announcement_types=tuple(dict.fromkeys(announcement_types or base.announcement_types)),
         include_unknown=include_unknown or base.include_unknown,
         only_open=only_open or base.only_open,
         discovery=discovery_enabled or base.discovery,
@@ -420,6 +450,8 @@ def _search_command(
     keywords: list[str],
     exclude_keywords: list[str],
     source_level: str | None,
+    source_categories: list[str],
+    announcement_types: list[str],
     include_unknown: bool,
     only_open: bool,
     discovery_enabled: bool,
@@ -427,10 +459,20 @@ def _search_command(
     deep: bool,
     database: str | None,
     dry_run: bool,
+    codex_output: bool = False,
 ) -> None:
-    request = _request_from_options(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep)
+    request = _request_from_options(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep)
     summary = SearchRunner(database=database).run(request, dry_run=dry_run)
-    typer.echo(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, default=_json_default))
+    payload = summary.as_dict()
+    if codex_output:
+        payload["NEXT_ACTIONS_FOR_CODEX"] = [
+            "读取 summary.md 和 results.json",
+            "优先检查 OPEN 项目及临近截止项目",
+            "读取 codex_review.md 中的 PENDING 项目 Snapshot/PDF",
+            "必要时执行 python -m tender_ai verify --project PROJECT_ID",
+            "确认事实后使用 set-field 写回 Evidence，再执行 python -m tender_ai recalc",
+        ]
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
 
 
 @app.command()
@@ -449,6 +491,8 @@ def search(
     keywords: list[str] = typer.Option([], "--keyword"),
     exclude_keywords: list[str] = typer.Option([], "--exclude-keyword"),
     source_level: str | None = typer.Option(None, "--source-level"),
+    source_categories: list[str] = typer.Option([], "--source-category"),
+    announcement_types: list[str] = typer.Option([], "--announcement-type"),
     include_unknown: bool = typer.Option(False, "--include-unknown"),
     only_open: bool = typer.Option(False, "--only-open"),
     discovery_enabled: bool = typer.Option(False, "--discovery"),
@@ -459,7 +503,7 @@ def search(
 ) -> None:
     """按需执行真实采集、规则抽取和状态筛选。"""
 
-    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run)
+    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run, codex_output=True)
 
 
 @app.command("codex-search")
@@ -478,6 +522,8 @@ def codex_search(
     keywords: list[str] = typer.Option([], "--keyword"),
     exclude_keywords: list[str] = typer.Option([], "--exclude-keyword"),
     source_level: str | None = typer.Option(None, "--source-level"),
+    source_categories: list[str] = typer.Option([], "--source-category"),
+    announcement_types: list[str] = typer.Option([], "--announcement-type"),
     include_unknown: bool = typer.Option(False, "--include-unknown"),
     only_open: bool = typer.Option(False, "--only-open"),
     discovery_enabled: bool = typer.Option(False, "--discovery"),
@@ -488,7 +534,7 @@ def codex_search(
 ) -> None:
     """Codex 首选的总控搜索命令，输出 sessions/results/review 文件。"""
 
-    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run)
+    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run)
 
 
 @app.command("review")
@@ -722,6 +768,168 @@ def sources(as_json: bool = typer.Option(False, "--json", help="使用 JSON 输�
     for item in registry.definitions:
         state = "enabled" if item.enabled and item.crawl_enabled else "disabled"
         typer.echo(f"{item.source_id:28} {item.source_name:24} {item.category:10} {state:8} {item.status}")
+
+
+@app.command("sessions")
+def sessions(
+    limit: int = typer.Option(20, "--limit", min=1, max=200),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """查看按需搜索历史；本命令只读数据库，不触发网络访问。"""
+
+    engine = initialize_database(create_engine_for(database))
+    with session_scope(engine) as session:
+        rows = session.scalars(select(SearchSession).order_by(SearchSession.started_at.desc()).limit(limit)).all()
+        payload = []
+        for row in rows:
+            try:
+                request = json.loads(row.request_json or "{}")
+            except json.JSONDecodeError:
+                request = {}
+            try:
+                errors = json.loads(row.errors_json or "[]")
+            except json.JSONDecodeError:
+                errors = []
+            payload.append({
+                "session_id": row.session_id,
+                "request_id": row.request_id,
+                "request": request,
+                "started_at": _json_default(row.started_at),
+                "finished_at": _json_default(row.finished_at) if row.finished_at else None,
+                "status": row.status,
+                "query_count": row.query_count,
+                "candidate_count": row.candidate_count,
+                "open_count": row.open_count,
+                "unknown_count": row.unknown_count,
+                "closed_count": row.closed_count,
+                "review_count": row.review_count,
+                "verification_count": row.verification_count,
+                "sources_planned": row.sources_planned,
+                "sources_completed": row.sources_completed,
+                "sources_failed": row.sources_failed,
+                "errors": errors,
+            })
+    typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("history")
+def history_command(
+    limit: int = typer.Option(20, "--limit", min=1, max=200),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """sessions 的中文工作流别名；只读，不触发网络访问。"""
+
+    sessions(limit=limit, database=database)
+
+
+@app.command("export")
+def export_command(
+    session_id: str = typer.Option(..., "--session", help="Search Session ID"),
+    include_unknown: bool = typer.Option(False, "--include-unknown", help="同时导出 UNKNOWN 项目"),
+    output: str | None = typer.Option(None, "--output", help="可选 XLSX 输出路径"),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """将一次搜索结果导出为 Excel；默认只导出 OPEN。"""
+
+    result = export_search_session(session_id, database=database, include_unknown=include_unknown, output_path=output)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("expand-search")
+def expand_search(
+    session_id: str = typer.Option(..., "--session", help="要扩展的历史 Search Session ID"),
+    deep: bool = typer.Option(False, "--deep"),
+    discovery: bool = typer.Option(False, "--discovery"),
+    wechat: bool = typer.Option(False, "--wechat"),
+    include_unknown: bool = typer.Option(False, "--include-unknown"),
+    database: str | None = typer.Option(None, "--database"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """基于历史条件扩大一次搜索；不会修改历史 Session。"""
+
+    engine = initialize_database(create_engine_for(database))
+    with session_scope(engine) as session:
+        row = session.get(SearchSession, session_id)
+        if row is None:
+            raise typer.BadParameter(f"Search Session 不存在: {session_id}")
+        try:
+            request = SearchRequest.from_dict(json.loads(row.request_json or "{}"))
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise typer.BadParameter("历史 Session 的 request_json 无法解析") from exc
+    request = replace(
+        request,
+        deep=request.deep or deep,
+        discovery=request.discovery or discovery or deep,
+        wechat=request.wechat or wechat or deep,
+        include_unknown=request.include_unknown or include_unknown,
+    )
+    summary = SearchRunner(database=database).run(request, dry_run=dry_run)
+    typer.echo(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("templates")
+def templates_command(
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """列出搜索模板；模板只保存条件，不会自动执行。"""
+
+    typer.echo(json.dumps(list_templates(database=database), ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("template-save")
+def template_save_command(
+    name: str = typer.Argument(..., help="模板名称"),
+    query: str | None = typer.Argument(None, help="可选中文快捷条件"),
+    profile: str = typer.Option("northwest_energy", "--profile"),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """保存一个按需搜索模板，不执行网络搜索。"""
+
+    request = parse_search_text(query, profile_id=profile) if query else SearchRequest(profile_id=profile)
+    result = save_template(name, request, database=database)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("template-run")
+def template_run_command(
+    template_id: str = typer.Option(..., "--template"),
+    database: str | None = typer.Option(None, "--database"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+) -> None:
+    """执行一个已保存模板；只有显式运行才会访问来源。"""
+
+    templates = list_templates(database=database, enabled_only=True)
+    selected = next((item for item in templates if item["template_id"] == template_id), None)
+    if selected is None:
+        raise typer.BadParameter(f"启用的模板不存在: {template_id}")
+    summary = SearchRunner(database=database).run(request_from_template(selected), dry_run=dry_run)
+    typer.echo(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("template-toggle")
+def template_toggle_command(
+    template_id: str = typer.Option(..., "--template"),
+    enabled: bool = typer.Option(..., "--enabled/--disabled"),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """启用或停用搜索模板，不触发搜索。"""
+
+    typer.echo(json.dumps(set_template_enabled(template_id, enabled, database=database), ensure_ascii=False, indent=2, default=_json_default))
+
+
+@app.command("web")
+def web_command(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port", min=1, max=65535),
+    database: str | None = typer.Option(None, "--database"),
+) -> None:
+    """启动本地数据浏览器；启动过程不执行搜索。"""
+
+    import uvicorn
+
+    from tender_ai.web.app import create_app
+
+    uvicorn.run(create_app(database=database), host=host, port=port, reload=False, log_level="info")
 
 
 def main() -> None:

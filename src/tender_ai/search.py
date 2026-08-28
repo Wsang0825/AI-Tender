@@ -26,8 +26,9 @@ from tender_ai.review import ensure_review_item, review_item_dict, write_review_
 from tender_ai.status.engine import recalculate_status
 from tender_ai.status.time import as_shanghai, now_shanghai, parse_datetime
 from tender_ai.storage.database import create_engine_for, initialize_database, session_scope
-from tender_ai.storage.models import Announcement, CodexReviewItem, Project, SearchSession, SearchSessionProject, Source
+from tender_ai.storage.models import Announcement, CodexReviewItem, Project, ProjectSource, SearchSession, SearchSessionProject, Source
 from tender_ai.storage.repository import add_status_history, project_to_record
+from tender_ai.sources.registry import SourceDefinition, SourceRegistry
 
 
 INDUSTRY_ALIASES: dict[str, tuple[str, ...]] = {
@@ -45,11 +46,16 @@ PROJECT_TYPE_TERMS = ("EPC", "PC", "施工", "设备采购", "工程总承包", 
 
 @dataclass(frozen=True)
 class SearchRequest:
+    request_id: str = field(default_factory=lambda: f"request_{uuid4().hex}")
     raw_query: str | None = None
     profile_id: str = "northwest_energy"
     region: str | None = None
     city: str | None = None
     county: str | None = None
+    regions: tuple[str, ...] = ()
+    region_codes: tuple[str, ...] = ()
+    cities: tuple[str, ...] = ()
+    counties: tuple[str, ...] = ()
     days: int = 30
     date_from: str | None = None
     date_to: str | None = None
@@ -59,28 +65,77 @@ class SearchRequest:
     keywords: tuple[str, ...] = ()
     exclude_keywords: tuple[str, ...] = ()
     source_level: str | None = None
+    source_categories: tuple[str, ...] = ()
+    announcement_types: tuple[str, ...] = ()
     include_unknown: bool = False
     only_open: bool = False
     discovery: bool = False
     wechat: bool = False
     deep: bool = False
 
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SearchRequest":
+        """从 SearchSession JSON 恢复请求，兼容第4步旧字段名。"""
+        values = dict(payload or {})
+        aliases = {
+            "industries": ("industries", "industry", "industry_groups"),
+            "project_types": ("project_types", "project_type"),
+            "equipment": ("equipment", "equipment_types"),
+            "keywords": ("keywords", "keyword", "include_keywords"),
+            "exclude_keywords": ("exclude_keywords", "exclude_keyword"),
+            "source_categories": ("source_categories", "source_category"),
+            "announcement_types": ("announcement_types",),
+        }
+        for target, names in aliases.items():
+            if target not in values:
+                for name in names:
+                    if name in values:
+                        values[target] = values[name]
+                        break
+        list_fields = {
+            "regions", "region_codes", "cities", "counties", "industries", "project_types", "equipment",
+            "keywords", "exclude_keywords", "source_categories", "announcement_types",
+        }
+        for key in list_fields:
+            value = values.get(key, ())
+            if isinstance(value, str):
+                value = (value,)
+            values[key] = tuple(str(item) for item in (value or ()) if str(item).strip())
+        values["request_id"] = str(values.get("request_id") or f"request_{uuid4().hex}")
+        allowed = set(cls.__dataclass_fields__)
+        return cls(**{key: value for key, value in values.items() if key in allowed})
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "request_id": self.request_id,
             "raw_query": self.raw_query,
             "profile_id": self.profile_id,
             "region": self.region,
             "city": self.city,
             "county": self.county,
+            "regions": list(self.regions or ((self.region,) if self.region else ())),
+            "region_codes": list(self.region_codes),
+            "cities": list(self.cities or ((self.city,) if self.city else ())),
+            "counties": list(self.counties or ((self.county,) if self.county else ())),
             "days": self.days,
             "date_from": self.date_from,
             "date_to": self.date_to,
+            "industries": list(self.industries),
             "industry": list(self.industries),
             "project_type": list(self.project_types),
             "equipment": list(self.equipment),
+            "equipment_types": list(self.equipment),
             "keyword": list(self.keywords),
+            "keywords": list(self.keywords),
+            "include_keywords": list(self.keywords),
             "exclude_keyword": list(self.exclude_keywords),
+            "exclude_keywords": list(self.exclude_keywords),
             "source_level": self.source_level,
+            "source_levels": [self.source_level] if self.source_level else [],
+            "source_categories": list(self.source_categories),
+            "announcement_types": list(self.announcement_types),
+            "industry_groups": list(self.industries),
+            "project_types": list(self.project_types),
             "include_unknown": self.include_unknown,
             "only_open": self.only_open,
             "discovery": self.discovery,
@@ -107,6 +162,16 @@ class SearchSummary:
     results_path: str | None = None
     review_markdown_path: str | None = None
     review_json_path: str | None = None
+    sources_planned: int = 0
+    sources_completed: int = 0
+    sources_failed: int = 0
+    projects_found: int = 0
+    verification_count: int = 0
+    source_plan: list[dict[str, Any]] = field(default_factory=list)
+    open_projects_path: str | None = None
+    unknown_projects_path: str | None = None
+    errors_path: str | None = None
+    sources_path: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +202,20 @@ def _resolve_region(text: str) -> tuple[str | None, str | None, str | None]:
     if match is None:
         return text or None, None, None
     return match.province, match.city, match.county
+
+
+def _region_code_for_text(text: str | None) -> str | None:
+    if not text:
+        return None
+    catalog = load_region_catalog()
+    normalized = normalize_identity(text)
+    candidates: list[tuple[int, str]] = []
+    for entry in catalog.entries:
+        for label in (entry.name, entry.short_name, *entry.aliases):
+            label_normalized = normalize_identity(label)
+            if label_normalized and (label_normalized == normalized or label_normalized in normalized):
+                candidates.append((len(label_normalized), entry.region_code))
+    return max(candidates)[1] if candidates else None
 
 
 def parse_search_text(text: str, *, profile_id: str = "northwest_energy") -> SearchRequest:
@@ -190,6 +269,10 @@ def parse_search_text(text: str, *, profile_id: str = "northwest_energy") -> Sea
         region=region,
         city=city,
         county=county,
+        regions=(region,) if region else (),
+        region_codes=tuple(code for code in (_region_code_for_text(region), _region_code_for_text(city), _region_code_for_text(county)) if code),
+        cities=(city,) if city else (),
+        counties=(county,) if county else (),
         days=days,
         industries=tuple(dict.fromkeys(industries)),
         project_types=tuple(dict.fromkeys(project_types)),
@@ -235,6 +318,84 @@ def _terms(request: SearchRequest) -> tuple[str, ...]:
     return tuple(terms[: (12 if request.deep else 8)])
 
 
+def _label_in_text(label: str | None, text: str) -> bool:
+    return bool(label) and normalize_identity(label) in normalize_identity(text)
+
+
+def _request_region_text(request: SearchRequest) -> str:
+    return " ".join(item for item in (request.region, request.city, request.county, *request.regions, *request.cities, *request.counties) if item)
+
+
+def _source_region_matches(definition: SourceDefinition, request: SearchRequest, profile: Any) -> bool:
+    """选择与本次请求有关的来源，不把无关省份来源带入计划。"""
+    source_region = (definition.region or "全国").strip()
+    if normalize_identity(source_region) in {"全国", "全国性"}:
+        return True
+    requested_text = _request_region_text(request)
+    if requested_text:
+        if _label_in_text(source_region, requested_text):
+            return True
+        try:
+            match = load_region_catalog().match(requested_text)
+            if match and any(_label_in_text(source_region, value) for value in match.path):
+                return True
+        except Exception:
+            pass
+        return False
+    if request.region_codes:
+        try:
+            catalog = load_region_catalog()
+            labels: set[str] = set()
+            for code in request.region_codes:
+                entry = catalog.get(code)
+                while entry is not None:
+                    labels.update(normalize_identity(label) for label in (entry.name, entry.short_name, *entry.aliases) if label)
+                    entry = catalog.get(entry.parent_code) if entry.parent_code else None
+            return normalize_identity(source_region) in labels or any(normalize_identity(source_region) in label for label in labels)
+        except Exception:
+            return True
+    try:
+        selected = load_region_catalog().selected(profile.regions, profile.excluded_regions)
+        return any(
+            _label_in_text(source_region, label)
+            for entry in selected
+            for label in (entry.name, entry.short_name, *entry.aliases)
+        )
+    except Exception:
+        return True
+
+
+def build_source_plan(request: SearchRequest) -> list[dict[str, Any]]:
+    """按地区、行业 Profile 和来源配置生成一次性 Source Plan。"""
+    profile = load_search_profiles().get(request.profile_id)
+    registry = SourceRegistry.from_file()
+    categories = set(request.source_categories or profile.source_categories)
+    rows: list[dict[str, Any]] = []
+    for definition in registry.definitions:
+        if not profile.allows_source(definition.source_id, definition.category):
+            continue
+        if categories and definition.category not in categories:
+            continue
+        if not _source_region_matches(definition, request, profile):
+            continue
+        runnable = bool(definition.enabled and definition.crawl_enabled)
+        reason = "READY" if runnable else ("DISABLED" if not definition.enabled else "ADAPTER_NOT_CONFIGURED")
+        rows.append({
+            "source_id": definition.source_id,
+            "source_name": definition.source_name,
+            "category": definition.category,
+            "region": definition.region,
+            "priority": definition.priority,
+            "adapter": definition.adapter,
+            "adapter_level": definition.adapter_level,
+            "requires_login": definition.requires_login,
+            "selected": runnable,
+            "reason": reason,
+        })
+    rows.sort(key=lambda row: (not row["selected"], row["priority"], row["source_id"]))
+    return rows
+
+
 def _start_of_day(value: datetime) -> datetime:
     local = as_shanghai(value)
     return local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -270,7 +431,21 @@ def _matches_region(project: Project, request: SearchRequest) -> bool:
     requested = (request.region, request.city, request.county)
     actual = (project.province, project.city, project.county)
     if not any(requested):
-        return True
+        if not request.region_codes:
+            return True
+        try:
+            catalog = load_region_catalog()
+            selected = catalog.selected(request.region_codes)
+            labels = {
+                normalize_identity(label)
+                for entry in selected
+                for label in (entry.name, entry.short_name, *entry.aliases)
+                if label
+            }
+            actual_text = normalize_identity(" ".join(item for item in (*actual, project.location) if item))
+            return bool(actual_text) and any(label in actual_text for label in labels)
+        except Exception:
+            return True
     for wanted, got in zip(requested, actual):
         if wanted and not (got and (normalize_identity(wanted) in normalize_identity(got) or normalize_identity(got) in normalize_identity(wanted))):
             return False
@@ -319,7 +494,8 @@ def _matched_terms(project: Project, announcement: Announcement | None, request:
 
 
 def _source_allowed(project: Project, request: SearchRequest) -> bool:
-    required = (request.source_level or "").upper()
+    profile = load_search_profiles().get(request.profile_id)
+    required = (request.source_level or profile.min_source_level or "").upper()
     if not required:
         return True
     ranks = {"A": 1, "B": 2, "C": 3, "D": 4, "E": 5}
@@ -334,11 +510,33 @@ def _status_allowed(project: Project, request: SearchRequest) -> bool:
     return project.status == "OPEN"
 
 
-def _compact_project(project: Project, announcement: Announcement | None, review_items: list[dict[str, Any]]) -> dict[str, Any]:
+def _next_deadline(project: Project) -> datetime | None:
+    values = [
+        getattr(project, field_name, None)
+        for field_name in ("qualification_deadline", "registration_deadline", "document_deadline", "bid_deadline", "open_time")
+    ]
+    values = [as_shanghai(value) for value in values if isinstance(value, datetime)]
+    return min(values) if values else None
+
+
+def _compact_project(session: Any, project: Project, announcement: Announcement | None, review_items: list[dict[str, Any]]) -> dict[str, Any]:
     def value(field_name: str) -> Any:
         item = getattr(project, field_name, None)
         return item.isoformat() if isinstance(item, datetime) else str(item) if item is not None else None
 
+    source_rows = []
+    for link in session.scalars(select(ProjectSource).where(ProjectSource.project_id == project.project_id)).all():
+        source = session.get(Source, link.source_id)
+        source_rows.append({
+            "source_id": link.source_id,
+            "source_name": source.source_name if source else None,
+            "source_level": project.source_level,
+            "source_url": link.source_url or (source.base_url if source else None),
+        })
+    deadline = _next_deadline(project)
+    remaining_hours = None
+    if deadline is not None:
+        remaining_hours = round((deadline - now_shanghai()).total_seconds() / 3600, 2)
     return {
         "project_id": project.project_id,
         "announcement_id": announcement.id if announcement else None,
@@ -374,6 +572,13 @@ def _compact_project(project: Project, announcement: Announcement | None, review
         "review_reasons": [item.get("reason") for item in review_items],
         "completeness_score": project.completeness_score,
         "overall_confidence": project.overall_confidence,
+        "remaining_hours": remaining_hours,
+        "source_count": len(source_rows) or (1 if project.source_url else 0),
+        "sources": source_rows,
+        "best_source_url": (source_rows[0].get("source_url") if source_rows else None) or project.source_url,
+        "is_new": project.lifecycle_state == "NEW",
+        "is_updated": project.lifecycle_state == "UPDATED",
+        "is_reopened": project.lifecycle_state == "REOPENED",
     }
 
 
@@ -384,31 +589,70 @@ class SearchRunner:
     def plan(self, request: SearchRequest) -> dict[str, Any]:
         profile = load_search_profiles().get(request.profile_id)
         terms = _terms(request)
-        crawl_plan = CrawlRunner(database=str(self.engine.url)).plan(profile_id=profile.profile_id)
-        discovery_queries = DiscoveryRunner(database=str(self.engine.url)).plan(profile_id=profile.profile_id, max_queries=12 if request.deep else 6)
+        source_plan = build_source_plan(request)
+        runnable_sources = [item for item in source_plan if item["selected"]]
+        day_start = _start_of_day(now_shanghai())
+        with session_scope(self.engine) as session:
+            daily_used = sum(
+                int(value or 0)
+                for value in session.scalars(
+                    select(SearchSession.query_count).where(
+                        SearchSession.started_at >= day_start,
+                        SearchSession.request_json.like(f'%"profile_id": "{request.profile_id}"%'),
+                    )
+                ).all()
+            )
+        daily_remaining = max(0, profile.max_queries_per_day - daily_used)
+        budget = min(profile.query_budget, daily_remaining)
+        discovery_requested = bool(request.discovery or request.deep)
+        discovery_cap = min(12 if request.deep else 6, budget // 3) if discovery_requested else 0
+        crawl_budget = max(0, budget - discovery_cap)
+        terms_per_source = max(1, crawl_budget // max(1, len(runnable_sources))) if runnable_sources and crawl_budget else 0
+        crawl_terms = list(terms[:terms_per_source]) if terms_per_source else []
+        crawl_query_count = len(runnable_sources) * len(crawl_terms)
+        discovery_query_count = min(discovery_cap, max(0, budget - crawl_query_count))
         return {
             "profile_id": profile.profile_id,
             "region": request.region,
             "city": request.city,
             "county": request.county,
-            "query_terms": list(terms),
-            "crawl_sources": crawl_plan["sources"],
-            "crawl_query_count_estimate": len(crawl_plan["sources"]) * len(terms),
-            "discovery_enabled": request.discovery or request.deep,
-            "discovery_query_count_estimate": len(discovery_queries) if request.discovery or request.deep else 0,
+            "query_budget": budget,
+            "daily_query_limit": profile.max_queries_per_day,
+            "daily_queries_used": daily_used,
+            "daily_queries_remaining": daily_remaining,
+            "query_terms": crawl_terms,
+            "crawl_sources": [item["source_id"] for item in runnable_sources],
+            "crawl_query_count_estimate": crawl_query_count,
+            "discovery_enabled": discovery_requested,
+            "discovery_query_count_estimate": discovery_query_count,
             "wechat_enabled": request.wechat or request.deep,
+            "max_results_per_query": profile.max_results_per_query,
+            "source_plan": source_plan,
+            "omitted_sources": [item for item in source_plan if not item["selected"]],
             "dry_run": True,
         }
 
-    def _create_session(self, request: SearchRequest, session_id: str) -> None:
+    def _create_session(self, request: SearchRequest, session_id: str, plan: dict[str, Any]) -> None:
         with session_scope(self.engine) as session:
-            session.add(SearchSession(session_id=session_id, request_json=json.dumps(request.to_dict(), ensure_ascii=False), started_at=now_shanghai(), status="RUNNING"))
+            session.add(
+                SearchSession(
+                    session_id=session_id,
+                    request_id=request.request_id,
+                    request_json=json.dumps(request.to_dict(), ensure_ascii=False),
+                    started_at=now_shanghai(),
+                    status="RUNNING",
+                    sources_planned=len(plan.get("crawl_sources", [])),
+                    source_plan_json=json.dumps(plan.get("source_plan", []), ensure_ascii=False),
+                )
+            )
 
     def _select_projects(self, session: Any, request: SearchRequest) -> list[tuple[Project, Announcement | None, list[str]]]:
         lower, upper = _date_bounds(request)
         profile = load_search_profiles().get(request.profile_id)
         candidates: list[tuple[Project, Announcement | None, list[str]]] = []
         for project in session.scalars(select(Project).order_by(Project.updated_at.desc())).all():
+            if project.ignored:
+                continue
             if not _matches_region(project, request) or not _matches_profile_regions(project, request, profile) or not _source_allowed(project, request):
                 continue
             publish_time = project.publish_time
@@ -416,6 +660,11 @@ class SearchRunner:
                 continue
             announcements = list(session.scalars(select(Announcement).where(Announcement.project_id == project.project_id).order_by(Announcement.published_at.desc(), Announcement.id.desc())).all())
             announcement = announcements[0] if announcements else None
+            if request.announcement_types and not any(
+                normalize_identity(value) in normalize_identity(str(announcement.announcement_type if announcement else project.announcement_type or ""))
+                for value in request.announcement_types
+            ):
+                continue
             if publish_time is None and announcement is not None and announcement.published_at is not None and not (lower <= as_shanghai(announcement.published_at) <= upper):
                 continue
             haystack = _project_text(project, announcement).casefold()
@@ -445,6 +694,16 @@ class SearchRunner:
             if not _status_allowed(project, request):
                 continue
             candidates.append((project, announcement, matched))
+        status_rank = {"OPEN": 0, "UNKNOWN": 1, "CLOSED": 2}
+        candidates.sort(
+            key=lambda item: (
+                status_rank.get(item[0].status, 9),
+                _next_deadline(item[0]) or datetime.max.replace(tzinfo=now_shanghai().tzinfo),
+                {"A": 0, "B": 1, "C": 2, "D": 3, "E": 4}.get((item[0].source_level or "E").upper(), 9),
+                -(as_shanghai(item[0].publish_time).timestamp() if item[0].publish_time else 0),
+                -(item[0].completeness_score or 0),
+            )
+        )
         return candidates
 
     def _write_outputs(self, session: Any, request: SearchRequest, session_id: str, summary: SearchSummary, selected: list[tuple[Project, Announcement | None, list[str]]]) -> None:
@@ -457,7 +716,7 @@ class SearchRunner:
         all_projects: list[dict[str, Any]] = []
         for project, announcement, matched in selected:
             item_rows = [row for row in review_rows if row["project_id"] == project.project_id]
-            compact = _compact_project(project, announcement, item_rows)
+            compact = _compact_project(session, project, announcement, item_rows)
             compact["matched_keywords"] = matched
             compact["matched_region"] = " / ".join(item for item in (project.province, project.city, project.county) if item)
             all_projects.append(compact)
@@ -466,26 +725,64 @@ class SearchRunner:
             elif project.status == "UNKNOWN":
                 unknown_projects.append(compact)
         results_payload = {
-            "session": {"session_id": session_id, "request": request.to_dict(), "query_count": summary.query_count, "candidate_count": len(all_projects)},
+            "session": {
+                "session_id": session_id,
+                "request_id": request.request_id,
+                "request": request.to_dict(),
+                "query_count": summary.query_count,
+                "queries_generated": summary.query_count,
+                "candidate_count": len(all_projects),
+                "projects_found": len(all_projects),
+                "sources_planned": summary.sources_planned,
+                "sources_completed": summary.sources_completed,
+                "sources_failed": summary.sources_failed,
+                "verification_count": summary.verification_count,
+                "status": "PARTIAL" if summary.errors else "COMPLETED",
+                "source_plan": summary.source_plan,
+            },
             "open_projects": open_projects,
             "unknown_projects": unknown_projects,
             "review_items": review_rows,
             "errors": summary.errors,
             "sources": summary.sources,
+            "source_health": summary.sources,
         }
         results_path = output_dir / "results.json"
         results_path.write_text(json.dumps(results_payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        open_projects_path = output_dir / "open_projects.json"
+        unknown_projects_path = output_dir / "unknown_projects.json"
+        errors_path = output_dir / "errors.json"
+        sources_path = output_dir / "sources.json"
+        open_projects_path.write_text(json.dumps(open_projects, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        unknown_projects_path.write_text(json.dumps(unknown_projects, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        errors_path.write_text(json.dumps(summary.errors, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        sources_path.write_text(json.dumps({"source_plan": summary.source_plan, "source_health": summary.sources}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         summary_path = output_dir / "summary.md"
         lines = [
             f"# Search Session {session_id}",
             "",
+            f"Request ID：{request.request_id}",
             f"搜索条件：{json.dumps(request.to_dict(), ensure_ascii=False)}",
+            f"地区：{' / '.join(item for item in (request.region, request.city, request.county) if item) or '按 Profile'}",
+            f"时间范围：{request.date_from or f'最近 {request.days} 天'} 至 {request.date_to or '现在'}",
+            f"行业：{', '.join(request.industries) or 'Profile 默认行业'}；Deep：{'是' if request.deep else '否'}",
+            f"来源计划：{summary.sources_planned} 个；成功：{summary.sources_completed} 个；失败：{summary.sources_failed} 个",
             f"查询数量：{summary.query_count}",
             f"候选数量：{len(all_projects)}",
             f"OPEN：{len(open_projects)}",
             f"UNKNOWN：{len(unknown_projects)}",
             f"Review 数量：{len(review_rows)}",
+            f"Verification 数量：{summary.verification_count}",
             f"失败来源/错误：{len(summary.errors)}",
+            "",
+            "## 输出文件",
+            "",
+            f"- results.json：{results_path}",
+            f"- open_projects.json：{open_projects_path}",
+            f"- unknown_projects.json：{unknown_projects_path}",
+            f"- codex_review.md：{output_dir / 'codex_review.md'}",
+            f"- errors.json：{errors_path}",
+            f"- sources.json：{sources_path}",
             "",
         ]
         for item in all_projects:
@@ -511,21 +808,28 @@ class SearchRunner:
         summary.results_path = str(results_path)
         summary.review_markdown_path = str(review_md)
         summary.review_json_path = str(review_json)
+        summary.open_projects_path = str(open_projects_path)
+        summary.unknown_projects_path = str(unknown_projects_path)
+        summary.errors_path = str(errors_path)
+        summary.sources_path = str(sources_path)
 
     def run(self, request: SearchRequest, *, dry_run: bool = False) -> SearchSummary:
         session_id = f"search_{now_shanghai().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         summary = SearchSummary(session_id=session_id, request=request.to_dict(), dry_run=dry_run)
+        plan = self.plan(request)
+        summary.source_plan = list(plan.get("source_plan", []))
+        summary.sources_planned = len(plan.get("crawl_sources", []))
         if dry_run:
-            plan = self.plan(request)
             summary.query_count = int(plan["crawl_query_count_estimate"] + plan["discovery_query_count_estimate"])
-            summary.sources = [{"source_id": source_id} for source_id in plan["crawl_sources"]]
+            summary.sources = [dict(item) for item in plan.get("source_plan", []) if item.get("selected")]
             summary.errors = []
             return summary
 
-        self._create_session(request, session_id)
-        terms = _terms(request)
+        self._create_session(request, session_id, plan)
+        terms = tuple(plan.get("query_terms", []))
         try:
             crawl = CrawlRunner(database=str(self.engine.url)).run(
+                source_ids=tuple(plan.get("crawl_sources", [])),
                 profile_id=request.profile_id,
                 since_days=request.days,
                 max_items=200 if request.deep else 80,
@@ -536,27 +840,32 @@ class SearchRunner:
             summary.query_count += sum(item.query_count for item in crawl.sources)
             summary.errors.extend(f"{item.source_id}: {item.error}" for item in crawl.sources if item.error)
             summary.sources.extend(item.__dict__ for item in crawl.sources)
+            summary.sources_completed += sum(1 for item in crawl.sources if not item.error)
+            summary.sources_failed += sum(1 for item in crawl.sources if item.error or item.failures)
         except Exception as exc:
             summary.errors.append(f"crawl: {exc}")
+            summary.sources_failed = summary.sources_planned
         if request.discovery or request.deep:
             try:
+                discovery_limit = int(plan.get("discovery_query_count_estimate", 0))
                 discovery_queries = tuple(
-                    f'"{item}" 招标 采购' for item in terms[: (12 if request.deep else 6)]
+                    f'"{item}" 招标 采购' for item in terms[:discovery_limit]
                 )
-                discovery = DiscoveryRunner(database=str(self.engine.url)).run(
-                    profile_id=request.profile_id,
-                    max_queries=12 if request.deep else 6,
-                    max_results=12 if request.deep else 8,
-                    custom_queries=discovery_queries,
-                    wechat_enabled=request.wechat or request.deep,
-                )
-                summary.query_count += discovery.query_count
-                summary.errors.extend(discovery.errors)
-                summary.sources.append({"provider": "discovery", "result_count": discovery.result_count, "wechat_candidates": discovery.wechat_candidate_count})
+                if discovery_queries:
+                    discovery = DiscoveryRunner(database=str(self.engine.url)).run(
+                        profile_id=request.profile_id,
+                        max_queries=discovery_limit,
+                        max_results=plan.get("max_results_per_query", 8),
+                        custom_queries=discovery_queries,
+                        wechat_enabled=request.wechat or request.deep,
+                    )
+                    summary.query_count += discovery.query_count
+                    summary.errors.extend(discovery.errors)
+                    summary.sources.append({"provider": "discovery", "result_count": discovery.result_count, "wechat_candidates": discovery.wechat_candidate_count, "status": "ACTIVE" if not discovery.errors else "DEGRADED"})
             except Exception as exc:
                 summary.errors.append(f"discovery: {exc}")
         try:
-            ExtractionRunner(database=str(self.engine.url)).run(sample_size=30, dry_run=False, consolidate=False)
+            ExtractionRunner(database=str(self.engine.url)).run(sample_size=30, dry_run=False, consolidate=False, reuse_cached=True)
         except Exception as exc:
             summary.errors.append(f"extract: {exc}")
         with session_scope(self.engine) as session:
@@ -577,25 +886,38 @@ class SearchRunner:
                             status_at_search=project.status,
                             is_new=project.lifecycle_state == "NEW",
                             is_updated=project.lifecycle_state in {"UPDATED", "REOPENED"},
+                            is_reopened=project.lifecycle_state == "REOPENED",
                         )
                     )
+            # session factory 明确关闭 autoflush；已有 Review Item 的
+            # search_session_id 是本轮刚更新的，写交接文件前必须让查询看到它。
+            session.flush()
             summary.candidate_count = len(selected)
+            summary.projects_found = summary.candidate_count
             summary.open_count = sum(1 for project, _, _ in selected if project.status == "OPEN")
             summary.unknown_count = sum(1 for project, _, _ in selected if project.status == "UNKNOWN")
             summary.closed_count = sum(1 for project, _, _ in selected if project.status == "CLOSED")
             self._write_outputs(session, request, session_id, summary, selected)
             row = session.get(SearchSession, session_id)
             row.finished_at = now_shanghai()
-            row.status = "COMPLETED" if not summary.errors else "COMPLETED_WITH_ERRORS"
+            row.status = "COMPLETED" if not summary.errors else "PARTIAL"
+            row.request_id = request.request_id
+            row.sources_planned = summary.sources_planned
+            row.sources_completed = summary.sources_completed
+            row.sources_failed = summary.sources_failed
+            row.queries_generated = summary.query_count
             row.query_count = summary.query_count
             row.candidate_count = summary.candidate_count
+            row.projects_found = summary.projects_found
             row.open_count = summary.open_count
             row.unknown_count = summary.unknown_count
             row.closed_count = summary.closed_count
             row.review_count = summary.review_count
+            row.verification_count = summary.verification_count
             row.errors_json = json.dumps(summary.errors, ensure_ascii=False)
             row.sources_json = json.dumps(summary.sources, ensure_ascii=False, default=str)
+            row.source_plan_json = json.dumps(summary.source_plan, ensure_ascii=False)
         return summary
 
 
-__all__ = ["SearchRequest", "SearchRunner", "SearchSummary", "parse_search_text"]
+__all__ = ["SearchRequest", "SearchRunner", "SearchSummary", "build_source_plan", "parse_search_text"]

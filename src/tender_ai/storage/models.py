@@ -475,18 +475,26 @@ class SearchSession(Base):
     __tablename__ = "search_sessions"
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_id: Mapped[str | None] = mapped_column(String(128), index=True)
     request_json: Mapped[str] = mapped_column(Text, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="RUNNING", index=True)
+    sources_planned: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sources_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sources_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    queries_generated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    projects_found: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     open_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     unknown_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     closed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    verification_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     errors_json: Mapped[str | None] = mapped_column(Text)
     sources_json: Mapped[str | None] = mapped_column(Text)
+    source_plan_json: Mapped[str | None] = mapped_column(Text)
 
 
 class SearchSessionProject(Base):
@@ -503,6 +511,7 @@ class SearchSessionProject(Base):
     status_at_search: Mapped[str] = mapped_column(String(16), nullable=False)
     is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_updated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_reopened: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class CodexReviewItem(Base):
@@ -527,6 +536,18 @@ class CodexReviewItem(Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
+
+
+class SearchTemplate(Base):
+    __tablename__ = "search_templates"
+
+    template_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
 
 
 class SystemMetadata(Base):
@@ -563,5 +584,6 @@ __all__ = [
     "SearchSession",
     "SearchSessionProject",
     "CodexReviewItem",
+    "SearchTemplate",
     "SystemMetadata",
 ]

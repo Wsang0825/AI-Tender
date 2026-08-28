@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="section-head"><h2>Discovery 发现的新来源</h2><span class="muted small">未知域名先保留为线索，不伪装成官方来源</span></div>
+<section class="panel table-wrap"><table><thead><tr><th>来源</th><th>域名</th><th>地区</th><th>项目数</th><th>等级猜测</th><th>置信度</th><th>状态</th><th>首次 / 最近</th></tr></thead><tbody>{% for item in sources %}<tr><td><a class="project-name" href="{{ item.source_url }}" target="_blank">{{ item.source_name or item.source_url }}</a><div class="subline">{{ item.discovery_method or '—' }}</div></td><td class="mono">{{ item.domain or '—' }}</td><td>{{ item.region or '—' }}</td><td>{{ item.projects_found }}</td><td><span class="tag tag-accent">{{ item.source_level_guess or '待判断' }}</span></td><td>{{ item.confidence }}</td><td>{{ item.status }}</td><td>{{ item.first_seen_at|dt }}<br>{{ item.last_seen_at|dt }}</td></tr>{% else %}<tr><td colspan="8" class="muted">暂无 Discovery 来源。</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}

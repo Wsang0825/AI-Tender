@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="callout">这是显式按需搜索。提交后会访问所选 Source、写入 SearchSession，并生成 Codex Review 文件；打开 Web 本身不会搜索。</div>
+{% if error %}<div class="callout error">{{ error }}</div>{% endif %}
+<form class="panel" method="post" action="/search/run">
+  <div class="section-head"><h2>Search Request</h2><span class="muted small">规则解析 · Snapshot · Evidence · Status Engine</span></div>
+  <div class="form-grid three">
+    <div class="form-field full"><label>自然语言快捷条件（复杂语义建议由 Codex 转成下方结构化条件）</label><input name="query" placeholder="例如：内蒙古最近30天光伏储能，只看现在还能参与的"></div>
+    <div class="form-field"><label>Search Profile</label><select name="profile">{% for item in profiles %}<option value="{{ item.profile_id }}">{{ item.name }} · {{ item.profile_id }}</option>{% endfor %}</select></div>
+    <div class="form-field"><label>地区 / 省</label><input name="region" placeholder="内蒙古自治区"></div>
+    <div class="form-field"><label>城市</label><input name="city" placeholder="哈密市 / 酒泉市"></div>
+    <div class="form-field"><label>县区</label><input name="county"></div>
+    <div class="form-field"><label>最近天数</label><input type="number" name="days" value="30" min="1" max="3650"></div>
+    <div class="form-field"><label>发布时间起（可选）</label><input type="date" name="date_from"></div>
+    <div class="form-field"><label>发布时间止（可选）</label><input type="date" name="date_to"></div>
+    <div class="form-field"><label>行业组（逗号分隔）</label><input name="industry" placeholder="solar, storage"></div>
+    <div class="form-field"><label>项目类型</label><input name="project_type" placeholder="EPC, 设备采购"></div>
+    <div class="form-field"><label>设备 / 关键词</label><input name="equipment" placeholder="光伏支架, PCS, 升压站"></div>
+    <div class="form-field"><label>包含关键词</label><input name="keywords" placeholder="招标、采购条件之外的词"></div>
+    <div class="form-field"><label>排除关键词</label><input name="exclude_keywords" placeholder="太阳能热水器"></div>
+    <div class="form-field"><label>来源类别</label><input name="source_category" placeholder="national, regional, enterprise"></div>
+    <div class="form-field"><label>公告类型</label><input name="announcement_type" placeholder="招标公告, 延期公告"></div>
+  </div>
+  <div class="check-row">
+    <label class="check"><input type="checkbox" name="only_open" value="1">只看 OPEN</label>
+    <label class="check"><input type="checkbox" name="include_unknown" value="1">包括 UNKNOWN</label>
+    <label class="check"><input type="checkbox" name="discovery" value="1">启用 Discovery</label>
+    <label class="check"><input type="checkbox" name="wechat" value="1">公众号公开索引</label>
+    <label class="check"><input type="checkbox" name="deep" value="1">Deep 模式</label>
+  </div>
+  <div class="form-actions"><button class="button button-primary" type="submit">执行搜索 →</button><a class="button button-quiet" href="/">取消</a></div>
+</form>
+
+<div class="section-head"><h2>已配置 Profile</h2><a href="/settings">管理设置 →</a></div>
+<section class="panel table-wrap"><table><thead><tr><th>PROFILE</th><th>地区</th><th>行业</th><th>预算</th><th>状态</th></tr></thead><tbody>{% for item in profiles %}<tr><td><b>{{ item.name }}</b><div class="subline">{{ item.profile_id }}</div></td><td>{{ item.regions|join(', ') or '未限定' }}</td><td>{{ item.industry_groups|join(', ') or '—' }}</td><td>{{ item.max_search_queries_per_run }} queries / run</td><td>{% if item.enabled %}<span class="status status-open">ENABLED</span>{% else %}<span class="status status-closed">DISABLED</span>{% endif %}</td></tr>{% endfor %}</tbody></table></section>
+{% endblock %}

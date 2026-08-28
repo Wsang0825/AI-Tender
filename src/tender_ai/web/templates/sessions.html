@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="section-head"><h2>搜索历史</h2><a href="/search">＋ 新搜索</a></div>
+<section class="panel stack">{% for item in sessions %}<a class="session-card" href="/sessions/{{ item.session_id }}"><div><h3>{{ item.session_id }}</h3><p>{{ item.started_at|dt }} · {{ item.request.region or '按 Profile' }} · {{ item.request.industries|join(' / ') if item.request.industries else '默认行业' }}{% if item.request.deep %} · DEEP{% endif %}</p><div class="subline">{{ item.status }} · sources {{ item.sources_completed }}/{{ item.sources_planned }}{% if item.sources_failed %} · failed {{ item.sources_failed }}{% endif %}</div></div><div class="session-stats"><span><b>{{ item.open_count }}</b><small>OPEN</small></span><span><b>{{ item.unknown_count }}</b><small>UNKNOWN</small></span><span><b>{{ item.review_count }}</b><small>REVIEW</small></span><span><b>{{ item.query_count }}</b><small>QUERIES</small></span></div></a>{% else %}<div class="empty-state"><div class="empty-glyph">∅</div><h2>没有搜索历史</h2><a class="button button-primary" href="/search">执行一次搜索</a></div>{% endfor %}</section>
+{% endblock %}

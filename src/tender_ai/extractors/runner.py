@@ -22,12 +22,12 @@ from tender_ai.sources.registry import SourceDefinition, SourceRegistry
 from tender_ai.status.engine import recalculate_status
 from tender_ai.status.metadata import describe_time
 from tender_ai.status.time import now_shanghai
-from tender_ai.storage.database import create_engine_for, initialize_database, refresh_tender_fts, session_scope
+from tender_ai.storage.database import create_engine_for, initialize_database, refresh_tender_fts, resolve_database_url, session_scope
 from tender_ai.storage.models import (
     Announcement, Attachment, CodexReviewItem, DocumentParse, Evidence, FieldConflict, Project, ProjectSource, Snapshot,
     TimeFieldMetadata, TimelineEvent, VerificationTask,
 )
-from tender_ai.storage.repository import save_evidence, save_tender_record
+from tender_ai.storage.repository import project_to_record, save_evidence, save_tender_record
 from tender_ai.review import ensure_review_item
 from tender_ai.verification.runner import build_verification_queries, verification_reasons
 from tender_ai.versioning import STATUS_RULE_VERSION
@@ -69,6 +69,7 @@ class ExtractionSummary:
     change_announcements: int = 0
     codex_review_items: int = 0
     review_cache_hits: int = 0
+    extraction_cache_hits: int = 0
     field_conflicts: int = 0
     reopened_count: int = 0
     manual_sample_size: int = 0
@@ -124,6 +125,7 @@ class ExtractionSummary:
             "change_announcements": self.change_announcements,
             "codex_review_items": self.codex_review_items,
             "review_cache_hits": self.review_cache_hits,
+            "extraction_cache_hits": self.extraction_cache_hits,
             "review_rate": self.review_rate,
             "field_conflicts": self.field_conflicts,
             "reopened_count": self.reopened_count,
@@ -546,6 +548,9 @@ class ExtractionRunner:
         self.engine = initialize_database(create_engine_for(database))
         self.registry = SourceRegistry.from_file()
         self.regions = load_region_catalog()
+        default_database = (APP_ROOT.parent / "data" / "tender.db").resolve()
+        configured_database = Path(resolve_database_url(database).removeprefix("sqlite:///")).resolve()
+        self.report_path = APP_ROOT.parent / "EXTRACTION_REPORT.md" if configured_database == default_database else None
 
     def _announcements(self, session: Any, announcement_id: int | None, source_id: str | None) -> list[Announcement]:
         statement = select(Announcement).order_by(Announcement.published_at.desc(), Announcement.id.desc())
@@ -556,6 +561,75 @@ class ExtractionRunner:
             ids = {row.project_id for row in session.scalars(select(ProjectSource.project_id).where(ProjectSource.source_id == source_id)).all()}
             rows = [row for row in rows if row.project_id in ids]
         return rows
+
+    @staticmethod
+    def _cached_extraction(session: Any, announcement: Announcement, snapshot: Snapshot | None) -> bool:
+        """判断公告正文是否已经按当前规则版本完成解析。
+
+        Search 是按需入口，但数据库保留历史公告。内容、文档解析器和抽取规则都
+        未变化时，不能因为一次新搜索而再次解析全部历史 PDF；状态仍在调用方中
+        基于当前 Asia/Shanghai 时间重新计算。
+        """
+
+        if announcement.extraction_status != "SUCCESS" or announcement.extraction_version != EXTRACTION_VERSION:
+            return False
+        content_hash_value = snapshot.sha256 if snapshot is not None else None
+        query = select(DocumentParse).where(
+            DocumentParse.announcement_id == announcement.id,
+            DocumentParse.attachment_id.is_(None),
+            DocumentParse.parser_version == DOCUMENT_PARSER_VERSION,
+            DocumentParse.parse_status == "SUCCESS",
+        )
+        if content_hash_value:
+            if announcement.content_hash and announcement.content_hash != content_hash_value:
+                return False
+            query = query.where(DocumentParse.content_hash == content_hash_value)
+        else:
+            # 早期真实数据部分没有 Snapshot，公告 content_hash 是原始 HTML/JSON
+            # 摘要，而 DocumentParse 保存的是清洗文本摘要，二者语义不同。此时
+            # 以已成功的当前抽取版本作为离线缓存边界；后续新抓取会始终创建 Snapshot。
+            query = query.where(DocumentParse.content_hash.is_not(None))
+        parsed = session.scalar(query.order_by(DocumentParse.id.desc()))
+        return parsed is not None
+
+    def _reuse_cached_status(self, session: Any, announcement: Announcement, summary: ExtractionSummary) -> None:
+        project = session.get(Project, announcement.project_id)
+        if project is None:
+            return
+        # 缓存命中时仍把已有规则结果计入报告，避免离线重跑报告显示为
+        # ``0/0``，让“缓存复用”和“规则抽取成功率”保持可解释。
+        cached_record = project_to_record(project)
+        summary.rule_fields_expected += len(KEY_FIELDS)
+        cached_fields = sum(
+            getattr(cached_record, field_name, None) not in (None, "")
+            for field_name in KEY_FIELDS
+        )
+        summary.rule_fields_found += cached_fields
+        summary.automatic_fields_filled += cached_fields
+        decision = recalculate_status(project_to_record(project), now_shanghai())
+        if project.status != decision.status.value:
+            from tender_ai.storage.repository import add_status_history
+
+            add_status_history(session, project.project_id, project.status, decision.status.value, decision.reason, now_shanghai())
+            project.status = decision.status.value
+        project.status_reason = decision.reason_code
+        project.status_evaluated_at = now_shanghai()
+        project.status_rule_version = STATUS_RULE_VERSION
+        project.updated_at = now_shanghai()
+        summary.extraction_cache_hits += 1
+        summary.announcements_processed += 1
+        if _change_type(announcement.title) != "original":
+            summary.change_announcements += 1
+        if project.status == "OPEN":
+            summary.open_count += 1
+        elif project.status == "CLOSED":
+            summary.closed_count += 1
+        else:
+            summary.unknown_count += 1
+        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.announcement_id == announcement.id)).all())
+        evidence_fields = {row.field_name for row in evidence_rows}
+        summary.evidence_total += len(TIME_FIELDS)
+        summary.evidence_covered += sum(1 for field_name in TIME_FIELDS if field_name in evidence_fields)
 
     def _extract_one(self, session: Any, announcement: Announcement, summary: ExtractionSummary, *, source_id: str | None, dry_run: bool) -> None:
         actual_source_id = _source_id(session, announcement, source_id)
@@ -712,13 +786,26 @@ class ExtractionRunner:
             })
         return sample, passed, {tag: category_counts.get(tag, 0) for tag in required_tags}, {tag: available_counts.get(tag, 0) for tag in required_tags}
 
-    def run(self, *, announcement_id: int | None = None, source_id: str | None = None, sample_size: int = 30, dry_run: bool = False, consolidate: bool = True) -> ExtractionSummary:
+    def run(
+        self,
+        *,
+        announcement_id: int | None = None,
+        source_id: str | None = None,
+        sample_size: int = 30,
+        dry_run: bool = False,
+        consolidate: bool = True,
+        reuse_cached: bool = False,
+    ) -> ExtractionSummary:
         summary = ExtractionSummary(dry_run=dry_run)
         with session_scope(self.engine) as session:
             rows = self._announcements(session, announcement_id, source_id)
             summary.announcements_seen = len(rows)
             for announcement in rows:
                 try:
+                    snapshot = session.get(Snapshot, announcement.snapshot_id) if announcement.snapshot_id else None
+                    if reuse_cached and not dry_run and self._cached_extraction(session, announcement, snapshot):
+                        self._reuse_cached_status(session, announcement, summary)
+                        continue
                     self._extract_one(session, announcement, summary, source_id=source_id, dry_run=dry_run)
                 except Exception as exc:
                     summary.failed += 1
@@ -741,7 +828,9 @@ class ExtractionRunner:
         return summary
 
     def _write_report(self, summary: ExtractionSummary) -> Path:
-        report_path = APP_ROOT.parent / "EXTRACTION_REPORT.md"
+        report_path = self.report_path
+        if report_path is None:
+            return APP_ROOT.parent / "EXTRACTION_REPORT.md"
         category_labels = {
             "OPEN": "OPEN",
             "UNKNOWN": "UNKNOWN",
@@ -756,7 +845,7 @@ class ExtractionRunner:
             for key, label in category_labels.items()
         )
         lines = [
-            "# 第4步 Extraction 报告",
+            "# 第4步 Extraction / 第5步 Codex 按需搜索集成报告",
             "",
             "系统定位：区域新能源招投标自动搜索系统",
             f"抽取版本：{EXTRACTION_VERSION}",
@@ -779,6 +868,7 @@ class ExtractionRunner:
             f"- CLOSED：{summary.closed_count}",
             f"- Codex Review Item：{summary.codex_review_items}",
             f"- Review 缓存复用：{summary.review_cache_hits}",
+            f"- 内容抽取缓存复用：{summary.extraction_cache_hits}",
             f"- Review 比例（以已处理公告计）：{summary.review_rate:.2%}",
             f"- FieldConflict：{summary.field_conflicts}",
             f"- REOPENED（本次抽取生命周期标记）：{summary.reopened_count}",
@@ -822,7 +912,8 @@ class ExtractionRunner:
             "## 本阶段范围",
             "",
             "- DONE：规则抽取、PDF/HTML/DOCX/XLSX文档流水线、Evidence、时间精度元数据、状态原因码、Snapshot/Replay、Review队列、Verification、项目去重保护、FieldConflict、Search CLI 基础接口。",
-            "- DEFERRED：第5步数据浏览器 UI；本项目不实现 Web 聊天 AI，也不依赖任何模型 API。",
+            "- DONE：第5步 FastAPI/Jinja2 数据浏览器、搜索历史/导出/模板、配置设置、Evidence/Timeline/附件查看、Manual Override、关注/忽略和 Source Health 页面。",
+            "- DEFERRED：Web 聊天 AI；本项目由 Codex 作为顶层 Agent，不实现也不依赖任何模型 API。",
         ])
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return report_path

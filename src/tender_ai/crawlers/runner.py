@@ -337,10 +337,15 @@ class CrawlRunner:
         refresh_tender_fts(session, session.get(Project, record.project_id), clean_text)
         _upsert_discovered_domain(session, original_url, record.source_level, record.source_name)
 
-    def plan(self, *, source_id: str | None = None, profile_id: str = "northwest_energy", max_pages: int | None = None) -> dict[str, Any]:
+    def plan(self, *, source_id: str | None = None, source_ids: tuple[str, ...] | None = None, profile_id: str = "northwest_energy", max_pages: int | None = None) -> dict[str, Any]:
         profile = load_search_profiles().get(profile_id)
         registry = SourceRegistry.from_file()
-        definitions = [registry.get(source_id)] if source_id else [item for item in registry.definitions if item.enabled and item.crawl_enabled and profile.allows_source(item.source_id, item.category)]
+        if source_id:
+            definitions = [registry.get(source_id)]
+        elif source_ids is not None:
+            definitions = [registry.get(item) for item in source_ids]
+        else:
+            definitions = [item for item in registry.definitions if item.enabled and item.crawl_enabled and profile.allows_source(item.source_id, item.category)]
         terms = self._query_terms(profile)
         return {
             "profile_id": profile.profile_id,
@@ -367,6 +372,7 @@ class CrawlRunner:
         self,
         *,
         source_id: str | None = None,
+        source_ids: tuple[str, ...] | None = None,
         profile_id: str = "northwest_energy",
         since_days: int | None = None,
         max_pages: int | None = None,
@@ -377,7 +383,12 @@ class CrawlRunner:
     ) -> CrawlSummary:
         profile = load_search_profiles().get(profile_id)
         registry = SourceRegistry.from_file()
-        definitions = [registry.get(source_id)] if source_id else [item for item in registry.definitions if item.enabled and item.crawl_enabled and profile.allows_source(item.source_id, item.category)]
+        if source_id:
+            definitions = [registry.get(source_id)]
+        elif source_ids is not None:
+            definitions = [registry.get(item) for item in source_ids]
+        else:
+            definitions = [item for item in registry.definitions if item.enabled and item.crawl_enabled and profile.allows_source(item.source_id, item.category)]
         summary = CrawlSummary(profile_id=profile.profile_id)
         effective_since_days = since_days or profile.lookback_days
         effective_terms = query_terms or self._query_terms(profile)
@@ -570,7 +581,7 @@ class CrawlRunner:
             "| SQLite WAL/FTS5/幂等运行 | DONE | FTS5 不可用时保留 LIKE fallback |",
             "| Source Health 与 recrawl 字段 | DONE | 健康原因、连续失败、零结果怀疑标记 |",
             "| Codex Review 交接 | DONE | Python 不调用任何 AI API；复杂记录输出 Snapshot/Evidence/Review 文件，由 Codex 按需阅读和写回 |",
-            "| Web 设置页、关注/忽略和人工修正 UI | DEFERRED | 按原计划第5步实现，数据库基础字段已预留 |",
+            "| Web 数据浏览器、搜索设置、关注/忽略和人工修正 UI | DONE | FastAPI/Jinja2 本地数据浏览器已实现；启动不触发搜索，操作仅在显式提交后生效 |",
             "",
             "## 说明",
             "",

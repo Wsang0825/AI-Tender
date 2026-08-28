@@ -34,21 +34,24 @@ def verification_reasons(project: Project) -> tuple[str, ...]:
 
 
 def build_verification_queries(project: Project | TenderRecord) -> tuple[str, ...]:
-    values = [
-        getattr(project, "project_name", None),
-        getattr(project, "tender_code", None),
-        getattr(project, "project_code", None),
-        getattr(project, "owner", None) or getattr(project, "purchaser", None),
-        getattr(project, "agency", None),
-    ]
+    project_name = " ".join(str(getattr(project, "project_name", "") or "").split()).strip()
+    tender_code = " ".join(str(getattr(project, "tender_code", "") or "").split()).strip()
+    project_code = " ".join(str(getattr(project, "project_code", "") or "").split()).strip()
+    owner = " ".join(str(getattr(project, "owner", None) or getattr(project, "purchaser", None) or "").split()).strip()
+    agency = " ".join(str(getattr(project, "agency", "") or "").split()).strip()
+    values = [project_name, tender_code, project_code, owner, agency]
     queries: list[str] = []
     for value in values:
-        text = " ".join(str(value or "").split()).strip()
-        if text and text not in queries:
-            queries.append(text)
-    project_name = " ".join(str(getattr(project, "project_name", "")).split()).strip()
+        if value and value not in queries:
+            queries.append(value)
     if project_name:
-        queries.append(f'"{project_name}" 招标')
+        queries.extend((f'"{project_name}" 招标', f'"{project_name}" 延期', f'"{project_name}" 变更', f'"{project_name}" 澄清'))
+    if tender_code:
+        queries.extend((f'"{tender_code}" 延期', f'"{tender_code}" 变更'))
+    if owner and project_name:
+        queries.append(f'"{owner}" "{project_name}"')
+    if agency and project_name:
+        queries.append(f'"{agency}" "{project_name}"')
     return tuple(dict.fromkeys(queries))
 
 
@@ -82,7 +85,9 @@ class VerificationRunner:
             project = session.get(Project, project_id)
             if project is None:
                 raise KeyError(f"unknown project_id: {project_id}")
-            return [project] if verification_reasons(project) else []
+            # 显式指定项目时，用户要求的是该项目的完整核验，而不是只核验
+            # 当前已被规则标记为 UNKNOWN 的项目。
+            return [project]
         projects = list(session.scalars(select(Project).where(Project.status == "UNKNOWN").order_by(Project.updated_at.desc())).all())
         candidates = [project for project in projects if verification_reasons(project)]
         return candidates[:max_tasks] if max_tasks else candidates

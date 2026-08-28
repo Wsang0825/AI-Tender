@@ -17,8 +17,11 @@ from tender_ai.extractors.tender import ExtractionResult, normalize_detail
 from tender_ai.sources.contracts import DetailPayload
 from tender_ai.sources.registry import SourceDefinition, SourceRegistry
 from tender_ai.status.time import now_shanghai
+from tender_ai.status.engine import recalculate_status
 from tender_ai.storage.database import create_engine_for, initialize_database, session_scope
-from tender_ai.storage.models import Announcement, Snapshot
+from tender_ai.storage.models import Announcement, Project, Snapshot
+from tender_ai.storage.repository import add_status_history, project_to_record
+from tender_ai.versioning import STATUS_RULE_VERSION
 
 
 @dataclass
@@ -68,10 +71,34 @@ class ReplayRunner:
     def __init__(self, *, database: str | None = None):
         self.engine = initialize_database(create_engine_for(database))
 
-    def run(self, *, announcement_id: int | None = None, source_id: str | None = None, dry_run: bool = False) -> ReplaySummary:
+    @staticmethod
+    def _recalculate_project(session: Any, project: Project) -> None:
+        decision = recalculate_status(project_to_record(project), now_shanghai())
+        old_status = project.status
+        project.status = decision.status.value
+        project.status_reason = decision.reason_code
+        project.status_evaluated_at = now_shanghai()
+        project.status_rule_version = STATUS_RULE_VERSION
+        project.updated_at = now_shanghai()
+        if old_status != project.status:
+            add_status_history(session, project.project_id, old_status, project.status, decision.reason)
+
+    def run(
+        self,
+        *,
+        announcement_id: int | None = None,
+        source_id: str | None = None,
+        dry_run: bool = False,
+        reextract: bool = True,
+        recalculate_status: bool = True,
+        rules_only: bool = True,
+    ) -> ReplaySummary:
         registry = SourceRegistry.from_file()
         regions = load_region_catalog()
         summary = ReplaySummary(dry_run=dry_run, errors=[])
+        # 当前主路径没有外部模型；参数用于让 Codex 明确选择“只跑规则”的
+        # 离线模式，并保证 Replay 永远不访问网络。
+        _ = rules_only
         with session_scope(self.engine) as session:
             query = select(Snapshot).order_by(Snapshot.captured_at)
             if announcement_id is not None:
@@ -82,6 +109,14 @@ class ReplayRunner:
             summary.snapshot_count = len(snapshots)
             for snapshot in snapshots:
                 try:
+                    announcement = session.get(Announcement, snapshot.announcement_id) if snapshot.announcement_id else None
+                    if not reextract:
+                        if not dry_run and recalculate_status and announcement is not None:
+                            project = session.get(Project, announcement.project_id)
+                            if project is not None:
+                                self._recalculate_project(session, project)
+                        summary.replayed_count += 1
+                        continue
                     payload, document = _payload_from_snapshot(snapshot)
                     if snapshot.source_id:
                         definition = registry.get(snapshot.source_id)
@@ -96,7 +131,6 @@ class ReplayRunner:
                         parser=document.parser,
                     )
                     if not dry_run:
-                        announcement = session.get(Announcement, snapshot.announcement_id) if snapshot.announcement_id else None
                         if announcement is not None:
                             extraction.record.project_id = announcement.project_id
                             extraction.record.source_url = announcement.source_url or payload.url

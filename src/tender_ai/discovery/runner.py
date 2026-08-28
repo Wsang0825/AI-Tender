@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy import select
 
-from tender_ai.config_loader import APP_ROOT, load_search_profiles
+from tender_ai.config_loader import APP_ROOT, load_search_profiles, load_yaml
 from tender_ai.discovery.providers import DDGSProvider, FallbackSearchProvider, SearchProviderError, SearXNGProvider, WeixinSearchProvider
 from tender_ai.discovery.queries import DiscoveryQuery, generate_discovery_queries
 from tender_ai.discovery.contracts import SearchResult
@@ -68,8 +68,27 @@ class DiscoveryRunner:
 
     @staticmethod
     def _provider() -> FallbackSearchProvider:
-        # DDGS 是当前默认；SearXNG/Custom 保持可替换，不要求安装或配置即可运行。
-        return FallbackSearchProvider([DDGSProvider(), SearXNGProvider()])
+        # Provider 由 YAML 控制；没有启用可用 Provider 时保持失败可见，不会偷偷切换后台任务。
+        providers: list[object] = []
+        try:
+            configured = load_yaml("search_providers.yaml").get("providers") or []
+        except Exception:
+            configured = []
+        for item in sorted(configured, key=lambda row: int(row.get("priority", 9))):
+            if not item.get("enabled", False):
+                continue
+            name = str(item.get("name") or "").lower()
+            if name == "ddgs":
+                provider = DDGSProvider()
+            elif name == "searxng":
+                provider = SearXNGProvider()
+            else:
+                continue
+            provider.cooldown = float(item.get("cooldown_seconds", 0) or 0)
+            providers.append(provider)
+        if not providers and not configured:
+            providers = [DDGSProvider()]
+        return FallbackSearchProvider(providers)
 
     def run(
         self,

@@ -130,6 +130,19 @@ def _ensure_runtime_columns(engine: Engine) -> None:
         "timeline_events": {
             "evidence_ids_json": "TEXT",
         },
+        "search_sessions": {
+            "request_id": "VARCHAR(128)",
+            "sources_planned": "INTEGER DEFAULT 0",
+            "sources_completed": "INTEGER DEFAULT 0",
+            "sources_failed": "INTEGER DEFAULT 0",
+            "queries_generated": "INTEGER DEFAULT 0",
+            "projects_found": "INTEGER DEFAULT 0",
+            "verification_count": "INTEGER DEFAULT 0",
+            "source_plan_json": "TEXT",
+        },
+        "search_session_projects": {
+            "is_reopened": "BOOLEAN DEFAULT 0",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:
@@ -165,6 +178,9 @@ def _ensure_indexes(engine: Engine) -> None:
         "ix_evidence_document_id": "evidence(document_id)",
         "ix_document_parses_document_id": "document_parses(document_id)",
         "ix_document_parses_project_id": "document_parses(project_id)",
+        "ix_search_sessions_started_at": "search_sessions(started_at)",
+        "ix_search_sessions_request_id": "search_sessions(request_id)",
+        "ix_search_session_projects_reopened": "search_session_projects(is_reopened)",
     }
     with engine.begin() as connection:
         for name, expression in indexes.items():
@@ -259,14 +275,28 @@ def search_projects(session: Session, query: str, *, limit: int = 50) -> list[st
         return []
     bind = session.get_bind()
     if bind.dialect.name == "sqlite" and fts5_available(bind):
-        rows = session.execute(sql_text("SELECT project_id FROM tender_fts WHERE tender_fts MATCH :query LIMIT :limit"), {"query": query, "limit": limit}).all()
-        return [str(row[0]) for row in rows]
+        try:
+            rows = session.execute(sql_text("SELECT project_id FROM tender_fts WHERE tender_fts MATCH :query LIMIT :limit"), {"query": query, "limit": limit}).all()
+            matches = [str(row[0]) for row in rows]
+            if matches:
+                return matches
+        except Exception:
+            # 中文连续文本、短横线和用户输入的特殊字符可能让 FTS5
+            # 分词器返回空集或语法错误，继续使用安全的参数化 LIKE。
+            pass
+    tokens = [token for token in query.split() if token] or [query]
+    clauses: list[str] = []
+    params: dict[str, object] = {"limit": limit}
+    for index, token in enumerate(tokens):
+        key = f"q{index}"
+        params[key] = f"%{token}%"
+        clauses.append(
+            f"(project_name LIKE :{key} OR raw_project_name LIKE :{key} OR owner LIKE :{key} "
+            f"OR agency LIKE :{key} OR qualification_summary LIKE :{key})"
+        )
     rows = session.execute(
-        sql_text(
-            "SELECT project_id FROM projects WHERE project_name LIKE :q OR owner LIKE :q OR agency LIKE :q "
-            "OR qualification_summary LIKE :q LIMIT :limit"
-        ),
-        {"q": f"%{query}%", "limit": limit},
+        sql_text(f"SELECT project_id FROM projects WHERE {' AND '.join(clauses)} LIMIT :limit"),
+        params,
     ).all()
     return [str(row[0]) for row in rows]
 

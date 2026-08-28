@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-tender"
-version = "0.1.0"
+version = "0.2.0"
 description = "Personal local regional renewable-energy tender discovery and extraction system"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

@@ -59,3 +59,27 @@ python -m alembic upgrade head
 pytest
 python -m tender_ai doctor
 ```
+
+## Stage 5 最终规则：Codex 按需搜索编排器
+
+本项目没有 AI API。不要检查、要求或配置 `OPENAI_API_KEY`、`OPENAI_MODEL`、`OPENAI_BASE_URL`。Python 主路径不得调用外部模型；`Codex` 本身是唯一智能层，负责自然语言理解、复杂公告阅读、疑难字段判断、结果总结和是否继续核验。
+
+当用户说“搜招标、查项目、找项目、看看有没有招标、查某地区光伏/储能”等当前信息请求时，不能只凭模型记忆回答，必须优先使用 `D:\AI-Tender` 本地系统。
+
+标准工作流：
+
+1. 理解用户条件并转换为结构化 `SearchRequest`：地区、城市、县区、天数、行业、项目类型、设备、关键词、是否只看 OPEN、是否包括 UNKNOWN、是否 Deep。
+2. 执行 `D:\AI-Tender.venv\Scripts\python.exe -m tender_ai codex-search ...`。
+3. 读取 `D:\AI-Tender\output\sessions\<session_id>\results.json`、`summary.md`、`open_projects.json`、`unknown_projects.json` 和 `codex_review.md/json`。
+4. 优先检查 OPEN、临近截止、高金额/大容量、日期冲突和待 Review 项目；普通项目不全部交给 Codex 阅读。
+5. Review 项目优先读取本地 `D:\AI-Tender\data\snapshots`、`D:\AI-Tender\downloads`、`D:\AI-Tender\data\documents`，已有本地文件时不要重复请求官网。
+6. 对高价值 UNKNOWN、弱来源、冲突或疑似延期项目执行 `python -m tender_ai verify --project PROJECT_ID`，只核验该项目，不重扫全省。
+7. Codex 只有看到真实 Snapshot/PDF/公告原文后才能用 `set-field` 写回事实字段。必须提供 `--evidence-text`、真实 `--source-url`，可提供 Snapshot/Document ID、PDF 页码，且 `--resolution-source CODEX_REVIEW`。
+8. Codex 不得直接写 `status=OPEN/CLOSED`。写回事实字段后由 Python Status Engine 计算，必要时执行 `python -m tender_ai recalc`。
+9. 最终回答必须说明真实搜索范围、时间、来源覆盖、OPEN/UNKNOWN/CLOSED 数量、截止时间、来源等级和不确定性。不能把未访问来源说成已覆盖。
+
+默认普通搜索速度优先；用户说“尽量找全、深度搜、不要漏、全面查”时加 `--deep`，并按需要加 `--discovery --wechat`。用户说“快速看看”时不启用 Deep。
+
+Stage 5 Web 是数据浏览器和配置控制台，不是聊天机器人。`python -m tender_ai web` 或 `D:\AI-Tender\start_web.bat` 只启动 `http://127.0.0.1:8765`，绝不自动搜索。修改 Web 设置后下一次显式搜索生效。
+
+变更代码或数据库结构时：保留现有真实数据，使用 Alembic；不要重置数据库、删除 Snapshot、附件、缓存或已通过测试。提交前运行 `python -m alembic upgrade head`、`python -m pytest -q`、`python -m tender_ai doctor`。
