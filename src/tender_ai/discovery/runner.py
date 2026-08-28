@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from tender_ai.config_loader import APP_ROOT, load_search_profiles
 from tender_ai.discovery.providers import DDGSProvider, FallbackSearchProvider, SearchProviderError, SearXNGProvider, WeixinSearchProvider
-from tender_ai.discovery.queries import generate_discovery_queries
+from tender_ai.discovery.queries import DiscoveryQuery, generate_discovery_queries
 from tender_ai.discovery.contracts import SearchResult
 from tender_ai.sources.registry import SourceRegistry
 from tender_ai.status.time import now_shanghai
@@ -78,16 +78,23 @@ class DiscoveryRunner:
         max_queries: int | None = None,
         max_results: int | None = None,
         rotation_day: int | None = None,
+        custom_queries: tuple[str, ...] | None = None,
+        wechat_enabled: bool | None = None,
     ) -> DiscoverySummary:
         profile = load_search_profiles().get(profile_id)
-        queries = generate_discovery_queries(max_queries=max_queries or profile.query_budget, rotation_day=rotation_day, profile_id=profile_id)
+        if custom_queries:
+            queries = [DiscoveryQuery(text=item, category="user_search", region=None, priority=1) for item in dict.fromkeys(custom_queries) if item.strip()]
+            queries = queries[: max_queries or profile.query_budget]
+        else:
+            queries = generate_discovery_queries(max_queries=max_queries or profile.query_budget, rotation_day=rotation_day, profile_id=profile_id)
         summary = DiscoverySummary(profile_id=profile_id, query_count=len(queries))
         if not profile.discovery_enabled:
             self._write_discovery_report(summary)
             return summary
         result_limit = max_results or profile.max_results_per_query
         provider = self._provider()
-        weixin = WeixinSearchProvider(provider) if profile.wechat_discovery_enabled else None
+        wechat_allowed = profile.wechat_discovery_enabled if wechat_enabled is None else wechat_enabled
+        weixin = WeixinSearchProvider(provider) if wechat_allowed else None
         registry = SourceRegistry.from_file()
         known = _known_domains(registry)
         new_domains: set[str] = set()

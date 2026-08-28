@@ -36,6 +36,8 @@ class TenderRecord(BaseModel):
 
     project_id: str = Field(default_factory=lambda: uuid4().hex)
     project_name: str
+    raw_project_name: str | None = None
+    canonical_project_name: str | None = None
     province: str | None = None
     city: str | None = None
     county: str | None = None
@@ -77,9 +79,17 @@ class TenderRecord(BaseModel):
     status: TenderStatus = TenderStatus.UNKNOWN
     status_reason: str | None = None
     status_evaluated_at: datetime | None = None
+    status_rule_version: str | None = None
     lifecycle_state: str = "NEW"
     last_change_at: datetime | None = None
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    field_confidence: float | None = None
+    source_confidence: float | None = None
+    project_match_confidence: float | None = None
+    overall_confidence: float | None = None
+    completeness_score: float | None = None
+    needs_codex_review: bool = False
+    review_reason: str | None = None
 
     @field_validator(*TIME_FIELDS, mode="before")
     @classmethod

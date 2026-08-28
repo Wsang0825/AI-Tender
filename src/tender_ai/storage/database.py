@@ -80,9 +80,20 @@ def _ensure_runtime_columns(engine: Engine) -> None:
             "status_reason": "VARCHAR(128)", "status_evaluated_at": "DATETIME",
             "lifecycle_state": "VARCHAR(16) DEFAULT 'NEW'", "last_change_at": "DATETIME",
             "favorite": "BOOLEAN DEFAULT 0", "ignored": "BOOLEAN DEFAULT 0", "ignore_reason": "TEXT",
+            "document_quality_score": "FLOAT", "extraction_version": "VARCHAR(64)",
+            "extraction_method": "VARCHAR(128)", "last_extracted_at": "DATETIME",
+            "verification_required": "BOOLEAN DEFAULT 0", "verification_reason": "TEXT",
+            "llm_extracted": "BOOLEAN DEFAULT 0",
+            "raw_project_name": "VARCHAR(500)", "canonical_project_name": "VARCHAR(500)",
+            "field_confidence": "FLOAT", "source_confidence": "FLOAT",
+            "project_match_confidence": "FLOAT", "overall_confidence": "FLOAT",
+            "completeness_score": "FLOAT", "needs_codex_review": "BOOLEAN DEFAULT 0",
+            "review_reason": "TEXT", "status_rule_version": "VARCHAR(64)",
         },
         "announcements": {
             "original_url": "TEXT", "canonical_url": "TEXT", "clean_text": "TEXT", "snapshot_id": "VARCHAR(64)",
+            "extraction_status": "VARCHAR(32) DEFAULT 'PENDING'", "extraction_parser": "VARCHAR(128)",
+            "document_quality_score": "FLOAT", "extraction_version": "VARCHAR(64)", "processed_at": "DATETIME",
         },
         "sources": {
             "adapter_level": "VARCHAR(32) DEFAULT 'CUSTOM_HTTP'", "adapter_config": "TEXT",
@@ -101,6 +112,23 @@ def _ensure_runtime_columns(engine: Engine) -> None:
         "search_queries": {
             "profile_id": "VARCHAR(128)", "last_success_at": "DATETIME", "new_project_count": "INTEGER DEFAULT 0",
             "run_count": "INTEGER DEFAULT 0", "last_error": "TEXT", "cooldown_until": "DATETIME",
+        },
+        "evidence": {
+            "snapshot_id": "VARCHAR(64)", "document_id": "VARCHAR(64)",
+            "sheet_name": "VARCHAR(256)", "cell_range": "VARCHAR(256)",
+            "extractor_type": "VARCHAR(64)", "extractor_version": "VARCHAR(64)",
+        },
+        "manual_overrides": {
+            "automatic_value": "TEXT", "manual_value": "TEXT", "changed_by": "VARCHAR(32) DEFAULT 'USER'",
+        },
+        "document_parses": {
+            "document_id": "VARCHAR(64)", "project_id": "VARCHAR(128)", "source_id": "VARCHAR(128)",
+            "document_type": "VARCHAR(64)", "file_path": "TEXT", "mime_type": "VARCHAR(128)",
+            "parser_version": "VARCHAR(64)", "parse_error": "TEXT",
+            "clean_text_path": "TEXT", "markdown_path": "TEXT", "parsed_at": "DATETIME",
+        },
+        "timeline_events": {
+            "evidence_ids_json": "TEXT",
         },
     }
     inspector = inspect(engine)
@@ -132,6 +160,11 @@ def _ensure_indexes(engine: Engine) -> None:
         "ix_projects_content_hash": "projects(content_hash)",
         "ix_announcements_canonical_url": "announcements(canonical_url)",
         "ix_project_sources_canonical_url": "project_sources(canonical_url)",
+        "ix_projects_needs_codex_review": "projects(needs_codex_review)",
+        "ix_evidence_snapshot_id": "evidence(snapshot_id)",
+        "ix_evidence_document_id": "evidence(document_id)",
+        "ix_document_parses_document_id": "document_parses(document_id)",
+        "ix_document_parses_project_id": "document_parses(project_id)",
     }
     with engine.begin() as connection:
         for name, expression in indexes.items():
@@ -143,9 +176,14 @@ def _ensure_fts5(engine: Engine) -> bool:
         return False
     try:
         with engine.begin() as connection:
+            existing = connection.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table' AND name='tender_fts'").fetchone()
+            if existing:
+                columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(tender_fts)").fetchall()}
+                if "canonical_project_name" not in columns or "raw_project_name" not in columns:
+                    connection.exec_driver_sql("DROP TABLE tender_fts")
             connection.exec_driver_sql(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS tender_fts USING fts5(" 
-                "project_id UNINDEXED, project_name, owner, agency, qualification_summary, announcement_text)"
+                "CREATE VIRTUAL TABLE IF NOT EXISTS tender_fts USING fts5("
+                "project_id UNINDEXED, canonical_project_name, raw_project_name, project_name, owner, agency, qualification_summary, announcement_text)"
             )
         return True
     except Exception:
@@ -171,13 +209,13 @@ def _rebuild_fts_if_empty(engine: Engine) -> None:
         if count:
             return
         rows = connection.exec_driver_sql(
-            "SELECT p.project_id, p.project_name, p.owner, p.agency, p.qualification_summary, "
+            "SELECT p.project_id, COALESCE(p.canonical_project_name, ''), COALESCE(p.raw_project_name, ''), p.project_name, p.owner, p.agency, p.qualification_summary, "
             "COALESCE(group_concat(a.clean_text, ' '), '') "
             "FROM projects p LEFT JOIN announcements a ON a.project_id=p.project_id GROUP BY p.project_id"
         ).fetchall()
         for row in rows:
             connection.exec_driver_sql(
-                "INSERT INTO tender_fts(project_id, project_name, owner, agency, qualification_summary, announcement_text) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tender_fts(project_id, canonical_project_name, raw_project_name, project_name, owner, agency, qualification_summary, announcement_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 tuple(row),
             )
 
@@ -198,11 +236,13 @@ def refresh_tender_fts(session: Session, project: object, announcement_text: str
     session.execute(sql_text("DELETE FROM tender_fts WHERE project_id=:project_id"), {"project_id": project_id})
     session.execute(
         sql_text(
-            "INSERT INTO tender_fts(project_id, project_name, owner, agency, qualification_summary, announcement_text) "
-            "VALUES (:project_id, :project_name, :owner, :agency, :qualification_summary, :announcement_text)"
+            "INSERT INTO tender_fts(project_id, canonical_project_name, raw_project_name, project_name, owner, agency, qualification_summary, announcement_text) "
+            "VALUES (:project_id, :canonical_project_name, :raw_project_name, :project_name, :owner, :agency, :qualification_summary, :announcement_text)"
         ),
         {
             "project_id": project_id,
+            "canonical_project_name": getattr(project, "canonical_project_name", "") or "",
+            "raw_project_name": getattr(project, "raw_project_name", "") or "",
             "project_name": getattr(project, "project_name", ""),
             "owner": getattr(project, "owner", "") or "",
             "agency": getattr(project, "agency", "") or "",

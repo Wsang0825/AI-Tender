@@ -81,6 +81,18 @@ def parse_datetime(value: Any, *, default_hour: int = 17) -> datetime | None:
             raise ValueError(f"时间超出范围: {value}")
         return datetime.combine(parsed_date, time(hour, minute, second), tzinfo=SHANGHAI_TZ)
 
+    partial_match = re.search(r"(?<!\d)(?P<month>\d{1,2})\s*\u6708\s*(?P<day>\d{1,2})\s*\u65e5?", text)
+    if partial_match:
+        parsed_date = date(datetime.now(SHANGHAI_TZ).year, int(partial_match.group("month")), int(partial_match.group("day")))
+        hour, minute, second, is_24 = _parse_clock(text[partial_match.end():])
+        if hour is None:
+            hour, minute, second, is_24 = default_hour, 0, 0, False
+        if is_24:
+            return datetime.combine(parsed_date + timedelta(days=1), time(0), tzinfo=SHANGHAI_TZ)
+        if hour > 23 or minute > 59:
+            raise ValueError(f"鏃堕棿瓒呭嚭鑼冨洿: {value}")
+        return datetime.combine(parsed_date, time(hour, minute, second), tzinfo=SHANGHAI_TZ)
+
     iso_text = text.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(iso_text)

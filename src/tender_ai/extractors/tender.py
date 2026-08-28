@@ -16,6 +16,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 
 from tender_ai.config_loader import RegionRegistry
+from tender_ai.documents.parser import ParsedDocument
 from tender_ai.evidence.models import EvidenceRecord
 from tender_ai.models import TenderRecord
 from tender_ai.sources.contracts import DetailPayload
@@ -23,19 +24,35 @@ from tender_ai.sources.registry import SourceDefinition
 from tender_ai.status.engine import recalculate_status
 from tender_ai.status.time import now_shanghai, parse_datetime
 from tender_ai.urls import canonicalize_url, content_hash
+from tender_ai.versioning import STATUS_RULE_VERSION
 
 
 _DATE_RE = re.compile(
-    r"\d{4}\s*[年/-]\s*\d{1,2}\s*[月/-]\s*\d{1,2}\s*日?(?:\s*(?:上午|下午|早上|晚上|PM|pm|AM|am)\s*)?(?:\d{1,2}\s*(?:[:：点时]\s*\d{1,2}\s*分?)?)?"
+    r"\d{4}\s*[年./-]\s*\d{1,2}\s*[月./-]\s*\d{1,2}\s*日?(?:\s*(?:上午|下午|早上|晚上|PM|pm|AM|am)\s*)?(?:\d{1,2}\s*(?:[:：点时]\s*\d{1,2}\s*分?)?)?"
 )
 _CAPACITY_RE = re.compile(r"(?<![\d.])(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>GW|GWp|MW|MWp|MWh|kW|kWh|兆瓦时|兆瓦|千瓦时|千瓦)", re.I)
 _MONEY_RE = re.compile(r"(?P<value>\d[\d,，]*(?:\.\d+)?)\s*(?P<unit>亿元|万元|万?元)")
+
+
+_DATE_SUFFIX = r"(?:\s*(?:\u4e0a\u5348|\u4e0b\u5348|\u65e9\u4e0a|\u665a\u4e0a|AM|PM)?\s*\d{1,2}(?:\s*(?:[:\uff1a\u70b9\u65f6])\s*\d{1,2}\s*\u5206?)?)?"
+_FULL_DATE_RE = re.compile(
+    r"\d{4}\s*(?:\u5e74|[-/])\s*\d{1,2}\s*(?:\u6708|[-/])\s*\d{1,2}\s*\u65e5?" + _DATE_SUFFIX,
+    re.I,
+)
+_PARTIAL_DATE_RE = re.compile(r"(?<!\d)\d{1,2}\s*\u6708\s*\d{1,2}\s*\u65e5" + _DATE_SUFFIX, re.I)
 
 
 @dataclass(frozen=True)
 class ExtractionResult:
     record: TenderRecord
     evidences: tuple[EvidenceRecord, ...]
+    parser: str = "rule.public_notice"
+    quality_score: float = 0.0
+    needs_codex_review: bool = False
+    review_reasons: tuple[str, ...] = ()
+    needs_llm: bool = False
+    missing_fields: tuple[str, ...] = ()
+    llm_used: bool = False
 
 
 def _clean(value: Any) -> str:
@@ -81,11 +98,18 @@ def _label_value(text: str, labels: tuple[str, ...], *, limit: int = 180) -> tup
     return (value or None), (value or None)
 
 
-def _date_values(text: str) -> list[datetime]:
+def _date_values(text: str, *, reference_year: int | None = None) -> list[datetime]:
     result: list[datetime] = []
-    for match in _DATE_RE.finditer(text):
+    matches: list[tuple[int, str]] = [(match.start(), match.group(0)) for match in _FULL_DATE_RE.finditer(text)]
+    full_spans = [match.span() for match in _FULL_DATE_RE.finditer(text)]
+    year = reference_year or now_shanghai().year
+    for match in _PARTIAL_DATE_RE.finditer(text):
+        if any(start <= match.start() < end for start, end in full_spans):
+            continue
+        matches.append((match.start(), f"{year}年{match.group(0)}"))
+    for _, raw_value in sorted(matches, key=lambda item: item[0]):
         try:
-            value = parse_datetime(match.group(0))
+            value = parse_datetime(raw_value)
         except (TypeError, ValueError):
             value = None
         if value and value not in result:
@@ -98,11 +122,14 @@ def _field_dates(text: str, labels: tuple[str, ...]) -> tuple[datetime | None, d
     match = re.search(rf"(?:{label})\s*[：:、]?\s*", text, re.I)
     if not match:
         return None, None, None
-    window = text[match.start(): match.end() + 220]
+    window = text[match.start(): match.end() + 260]
     values = _date_values(window)
     if not values:
         return None, None, None
     raw = _clean(window)
+    label_text = text[match.start():match.end()]
+    if len(values) == 1 and ("截止" in label_text or "截止" in window[:80]):
+        return None, values[0], raw
     return values[0], values[-1], raw
 
 
@@ -173,6 +200,24 @@ def _project_type(text: str) -> str | None:
     return None
 
 
+def _participation_method(text: str, metadata: dict[str, Any]) -> str | None:
+    value = _first_value(metadata, "participation_method", "participation", "register_platform", "download_platform")
+    if value:
+        return value
+    value, _ = _label_value(
+        text,
+        ("\u53c2\u4e0e\u65b9\u5f0f", "\u62a5\u540d\u65b9\u5f0f", "\u6587\u4ef6\u83b7\u53d6\u65b9\u5f0f", "\u62db\u6807\u6587\u4ef6\u83b7\u53d6\u65b9\u5f0f", "\u91c7\u8d2d\u6587\u4ef6\u83b7\u53d6\u65b9\u5f0f", "\u6587\u4ef6\u4e0b\u8f7d\u65b9\u5f0f"),
+        limit=320,
+    )
+    if value:
+        return value
+    for marker in ("\u6295\u6807\u622a\u6b62\u65f6\u95f4\u524d", "\u5f00\u6807\u524d", "\u622a\u6b62\u524d\u4e0b\u8f7d", "\u81ea\u884c\u4e0b\u8f7d", "\u7f51\u4e0a\u62a5\u540d", "\u5728\u7ebf\u62a5\u540d"):
+        position = text.find(marker)
+        if position >= 0:
+            return _clean(text[max(0, position - 100): position + 220])
+    return None
+
+
 def _stable_project_id(code: str | None, name: str, url: str) -> str:
     identity = f"code:{code}" if code else f"name:{re.sub(r'\\s+', '', name).lower()}"
     if not code:
@@ -188,9 +233,18 @@ def _source_level(definition: SourceDefinition) -> str:
     return "D"
 
 
-def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regions: RegionRegistry) -> ExtractionResult:
+def normalize_detail(
+    payload: DetailPayload,
+    definition: SourceDefinition,
+    regions: RegionRegistry,
+    *,
+    document: ParsedDocument | None = None,
+    source_file: str | None = None,
+    page_number: int | None = None,
+    parser: str = "rule.public_notice",
+) -> ExtractionResult:
     metadata = _metadata(payload)
-    text = _body_text(payload)
+    text = document.text if document is not None and document.text else _body_text(payload)
     combined = _clean(" ".join(str(value) for value in [payload.title, text, *metadata.values()] if value not in (None, "")))
     title = _clean(_first_value(metadata, "customtitle", "title", "projectname") or payload.title) or "未命名公告"
 
@@ -225,9 +279,12 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
     capacity_mw, capacity_mwh, scale_match = _capacity(combined)
 
     q_start, q_deadline, q_raw = _field_dates(text, ("资格预审申请文件递交截止时间", "资格预审报名时间", "资格预审时间"))
-    d_start, d_deadline, d_raw = _field_dates(text, ("获取采购文件时间", "获取招标文件时间", "获取文件时间", "文件获取时间", "报名时间"))
+    registration_start, registration_deadline, registration_raw = _field_dates(text, ("报名起止时间", "报名开始时间", "报名截止时间", "报名时间"))
+    d_start, d_deadline, d_raw = _field_dates(text, ("获取采购文件时间", "获取招标文件时间", "获取文件时间", "文件获取时间", "资料下载时间", "文件获取截止时间", "获取招标文件截止时间", "获取采购文件截止时间"))
     b_start, b_deadline, b_raw = _field_dates(text, ("投标文件递交截止时间", "投标截止时间", "响应文件递交截止时间", "提交投标文件截止时间", "递交响应文件截止时间"))
-    _, open_time, o_raw = _field_dates(text, ("开标时间", "响应文件开启时间", "开标日期"))
+    open_start, open_time, o_raw = _field_dates(text, ("开标时间", "响应文件开启时间", "开标日期"))
+    if open_time is None:
+        open_time = open_start
 
     if not b_deadline:
         raw_deadline = _first_value(metadata, "bid_deadline", "projectstatus")
@@ -238,6 +295,8 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
     record = TenderRecord(
         project_id=_stable_project_id(code, project_name, payload.url),
         project_name=project_name,
+        raw_project_name=project_name,
+        canonical_project_name=re.sub(r"[\s\-—_()（）【】\[\]，。,.;；:：/\\]+", "", project_name).lower(),
         province=region_match.province if region_match else definition.region,
         city=region_match.city if region_match else None,
         county=region_match.county if region_match else None,
@@ -258,6 +317,8 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
         publish_time=published_at or payload.metadata.get("published_at"),
         qualification_start=q_start,
         qualification_deadline=q_deadline,
+        registration_start=registration_start,
+        registration_deadline=registration_deadline,
         document_start=d_start,
         document_deadline=d_deadline,
         bid_deadline=b_deadline,
@@ -274,7 +335,9 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
         first_seen_at=now_shanghai(),
         last_seen_at=now_shanghai(),
         confidence_score=0.82 if text else 0.62,
+        status_rule_version=STATUS_RULE_VERSION,
     )
+    record.participation_method = _participation_method(text, metadata)
     decision = recalculate_status(record)
     record.status = decision.status
     record.status_reason = decision.reason_code
@@ -283,16 +346,27 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
     evidence_values: list[tuple[str, Any, str | None, float]] = [
         ("project_name", record.project_name, project_name, 0.92),
         ("owner", record.owner, owner, 0.82),
+        ("purchaser", record.purchaser, purchaser, 0.82),
         ("agency", record.agency, agency, 0.82),
         ("project_code", record.project_code, code, 0.9),
+        ("project_type", record.project_type, record.project_type, 0.78),
+        ("project_scale", record.project_scale, scale_match, 0.76),
         ("budget", record.budget, budget_raw, 0.82),
         ("publish_time", record.publish_time, published_raw, 0.9),
+        ("qualification_deadline", record.qualification_deadline, q_raw, 0.84),
+        ("registration_start", record.registration_start, registration_raw, 0.82),
+        ("registration_deadline", record.registration_deadline, registration_raw, 0.86),
+        ("document_start", record.document_start, d_raw, 0.82),
         ("document_deadline", record.document_deadline, d_raw, 0.8),
         ("bid_deadline", record.bid_deadline, b_raw, 0.86),
         ("open_time", record.open_time, o_raw, 0.86),
         ("capacity_mw", record.capacity_mw, scale_match, 0.75),
+        ("capacity_mwh", record.capacity_mwh, scale_match, 0.75),
+        ("qualification_summary", record.qualification_summary, record.qualification_summary, 0.65),
+        ("participation_method", record.participation_method, record.participation_method, 0.65),
     ]
     evidences: list[EvidenceRecord] = []
+    evidence_file = source_file or (document.source_file if document is not None else None)
     for field_name, value, raw_hint, confidence in evidence_values:
         if value in (None, ""):
             continue
@@ -300,8 +374,105 @@ def normalize_detail(payload: DetailPayload, definition: SourceDefinition, regio
         raw = _clean(raw_hint) if raw_hint else normalized
         position = text.find(str(raw).strip()) if raw else -1
         source_text = text[max(0, position - 80): position + 240] if position >= 0 else text[:320]
-        evidences.append(EvidenceRecord(field_name=field_name, normalized_value=normalized, raw_value=raw, source_url=payload.url, source_text=source_text, extractor="rule.public_notice", confidence=confidence))
-    return ExtractionResult(record=record, evidences=tuple(evidences))
+        evidence_page = page_number or (document.page_for(raw) if document is not None else None)
+        evidences.append(EvidenceRecord(field_name=field_name, normalized_value=normalized, raw_value=raw, source_url=payload.url, source_file=evidence_file, page_number=evidence_page, source_text=source_text, extractor=parser, confidence=confidence))
+    required_fields = ("owner", "agency", "project_code", "registration_deadline", "document_deadline", "bid_deadline")
+    missing_fields = tuple(field_name for field_name in required_fields if getattr(record, field_name, None) in (None, ""))
+    return ExtractionResult(
+        record=record,
+        evidences=tuple(evidences),
+        parser=parser,
+        quality_score=document.quality_score if document is not None else (75.0 if text else 0.0),
+        needs_codex_review=bool(missing_fields) or record.status_reason == "UNKNOWN_CONFLICTING_DATES",
+        review_reasons=("SOURCE_INCOMPLETE",) if missing_fields else (("CONFLICTING_DATE",) if record.status_reason == "UNKNOWN_CONFLICTING_DATES" else ()),
+        needs_llm=bool(missing_fields) or record.status_reason == "UNKNOWN_CONFLICTING_DATES",
+        missing_fields=missing_fields,
+    )
+
+
+_PRECISE_DATE_FIELD_LABELS = (
+    "\u8d44\u683c\u9884\u5ba1\u7533\u8bf7\u6587\u4ef6\u9012\u4ea4\u622a\u6b62\u65f6\u95f4",
+    "\u8d44\u683c\u9884\u5ba1\u65f6\u95f4",
+    "\u8d44\u683c\u9884\u5ba1\u62a5\u540d\u65f6\u95f4",
+    "\u62a5\u540d\u622a\u6b62\u65f6\u95f4",
+    "\u62a5\u540d\u5f00\u59cb\u65f6\u95f4",
+    "\u62a5\u540d\u65f6\u95f4",
+    "\u83b7\u53d6\u91c7\u8d2d\u6587\u4ef6\u65f6\u95f4",
+    "\u83b7\u53d6\u62db\u6807\u6587\u4ef6\u65f6\u95f4",
+    "\u83b7\u53d6\u6587\u4ef6\u65f6\u95f4",
+    "\u6587\u4ef6\u83b7\u53d6\u65f6\u95f4",
+    "\u4e0b\u8f7d\u65f6\u95f4",
+    "\u6295\u6807\u6587\u4ef6\u9012\u4ea4\u622a\u6b62\u65f6\u95f4",
+    "\u6295\u6807\u622a\u6b62\u65f6\u95f4",
+    "\u54cd\u5e94\u6587\u4ef6\u9012\u4ea4\u622a\u6b62\u65f6\u95f4",
+    "\u63d0\u4ea4\u6295\u6807\u6587\u4ef6\u622a\u6b62\u65f6\u95f4",
+    "\u9012\u4ea4\u54cd\u5e94\u6587\u4ef6\u622a\u6b62\u65f6\u95f4",
+    "\u5f00\u6807\u65f6\u95f4",
+    "\u54cd\u5e94\u6587\u4ef6\u5f00\u542f\u65f6\u95f4",
+    "\u5f00\u6807\u65e5\u671f",
+)
+_PRECISE_FIELD_LABEL_BOUNDARY = (
+    *_PRECISE_DATE_FIELD_LABELS,
+    "\u9879\u76ee\u540d\u79f0", "\u9879\u76ee\u7f16\u53f7", "\u62db\u6807\u9879\u76ee\u7f16\u53f7", "\u91c7\u8d2d\u9879\u76ee\u7f16\u53f7", "\u62db\u6807\u7f16\u53f7", "\u91c7\u8d2d\u7f16\u53f7",
+    "\u62db\u6807\u4eba", "\u91c7\u8d2d\u4eba", "\u91c7\u8d2d\u5355\u4f4d", "\u62db\u6807\u4ee3\u7406\u673a\u6784", "\u4ee3\u7406\u673a\u6784", "\u91c7\u8d2d\u4ee3\u7406\u673a\u6784",
+    "\u9884\u7b97\u91d1\u989d", "\u91c7\u8d2d\u9884\u7b97", "\u9879\u76ee\u9884\u7b97", "\u9879\u76ee\u6982\u51b5", "\u8d44\u683c\u8981\u6c42", "\u53c2\u4e0e\u65b9\u5f0f",
+)
+_PRECISE_DATE_FIELD_ALIASES = (
+    "\u62a5\u540d\u622a\u6b62\u65e5\u671f", "\u62a5\u540d\u8d77\u6b62\u65f6\u95f4",
+    "\u83b7\u53d6\u62db\u6807\u6587\u4ef6\u622a\u6b62\u65f6\u95f4", "\u83b7\u53d6\u91c7\u8d2d\u6587\u4ef6\u622a\u6b62\u65f6\u95f4", "\u6587\u4ef6\u83b7\u53d6\u622a\u6b62\u65f6\u95f4", "\u6587\u4ef6\u83b7\u53d6\u622a\u6b62\u65e5\u671f", "\u6587\u4ef6\u9886\u53d6\u622a\u6b62\u65f6\u95f4", "\u62db\u6807\u6587\u4ef6\u9886\u53d6\u622a\u6b62\u65f6\u95f4",
+    "\u6295\u6807\u622a\u6b62\u65e5\u671f", "\u9012\u4ea4\u6295\u6807\u6587\u4ef6\u622a\u6b62\u65f6\u95f4",
+)
+_PRECISE_DATE_FIELD_LABELS = (*_PRECISE_DATE_FIELD_LABELS, *_PRECISE_DATE_FIELD_ALIASES)
+_PRECISE_FIELD_LABEL_BOUNDARY = (*_PRECISE_FIELD_LABEL_BOUNDARY, *_PRECISE_DATE_FIELD_ALIASES)
+
+
+def _label_value(text: str, labels: tuple[str, ...], *, limit: int = 180) -> tuple[str | None, str | None]:
+    """Extract one labelled value and stop at the next known field label."""
+
+    label = "|".join(re.escape(item) for item in sorted(labels, key=len, reverse=True))
+    match = re.search(rf"(?:{label})\s*[\uFF1A:]?\s*", text, re.I)
+    if not match:
+        return None, None
+    tail = text[match.end(): match.end() + limit]
+    boundary = "|".join(re.escape(item) for item in sorted(_PRECISE_FIELD_LABEL_BOUNDARY, key=len, reverse=True))
+    tail_match = re.search(rf"(?:{boundary})\s*[\uFF1A:]?\s*", tail, re.I)
+    if tail_match:
+        tail = tail[:tail_match.start()]
+    value = _clean(tail)
+    return (value or None), (value or None)
+
+
+def _field_dates(text: str, labels: tuple[str, ...]) -> tuple[datetime | None, datetime | None, str | None]:
+    """Read dates only until the next labelled schedule field."""
+
+    effective_labels = list(labels)
+    label_text = "".join(labels)
+    if "\u8d44\u683c" in label_text:
+        pass
+    elif "\u6295\u6807" in label_text or "\u54cd\u5e94" in label_text:
+        effective_labels.extend(item for item in _PRECISE_DATE_FIELD_ALIASES if "\u6295\u6807" in item or "\u9012\u4ea4" in item)
+    elif "\u6587\u4ef6" in label_text or "\u83b7\u53d6" in label_text or "\u4e0b\u8f7d" in label_text:
+        effective_labels = [item for item in effective_labels if item != "\u62a5\u540d\u65f6\u95f4"]
+        effective_labels.extend(item for item in _PRECISE_DATE_FIELD_ALIASES if "\u6587\u4ef6" in item)
+    elif "\u62a5\u540d" in label_text or "\u8d44\u683c" in label_text:
+        effective_labels.extend(item for item in _PRECISE_DATE_FIELD_ALIASES if "\u62a5\u540d" in item)
+    label = "|".join(re.escape(item) for item in sorted(set(effective_labels), key=len, reverse=True))
+    match = re.search(rf"(?:{label})\s*[\uFF1A:]?\s*", text, re.I)
+    if not match:
+        return None, None, None
+    tail = text[match.end(): match.end() + 320]
+    boundary = "|".join(re.escape(item) for item in sorted(_PRECISE_DATE_FIELD_LABELS, key=len, reverse=True))
+    next_field = re.search(rf"(?:{boundary})\s*[\uFF1A:]?\s*", tail, re.I)
+    end = match.end() + (next_field.start() if next_field else min(len(tail), 220))
+    window = text[match.start():end]
+    values = _date_values(window)
+    if not values:
+        return None, None, None
+    raw = _clean(window)
+    label_text = text[match.start():match.end()]
+    if len(values) == 1 and ("\u622a\u6b62" in label_text or "\u622a\u6b62" in window[:80]):
+        return None, values[0], raw
+    return values[0], values[-1], raw
 
 
 __all__ = ["ExtractionResult", "normalize_detail"]

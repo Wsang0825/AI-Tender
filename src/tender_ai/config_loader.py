@@ -135,6 +135,45 @@ class RegionCatalog:
             if entry.region_code in selected_codes and entry.region_code not in excluded_set
         )
 
+    def match(self, text: str | None) -> RegionMatch | None:
+        """按全国目录中的名称、简称和别名匹配省/市/县层级。"""
+
+        if not text:
+            return None
+        normalized = _normalize_text(str(text))
+        candidates: list[tuple[int, int, RegionEntry, str]] = []
+        level_rank = {"province": 0, "special_region": 0, "city": 1, "prefecture": 1, "county": 2, "district": 2}
+        for entry in self.entries:
+            labels = (entry.name, entry.short_name or "", *entry.aliases)
+            for label in labels:
+                label_normalized = _normalize_text(label)
+                if label_normalized and label_normalized in normalized:
+                    candidates.append((level_rank.get(entry.level, 0), len(label_normalized), entry, label))
+        if not candidates:
+            return None
+        _, _, matched, matched_text = max(candidates, key=lambda item: (item[0], item[1]))
+        chain: list[RegionEntry] = [matched]
+        parent_code = matched.parent_code
+        while parent_code:
+            parent = self._by_code.get(parent_code)
+            if parent is None:
+                break
+            chain.append(parent)
+            parent_code = parent.parent_code
+        chain.reverse()
+        province = chain[0].name if chain else matched.name
+        city = matched.name if matched.level in {"city", "prefecture"} else next(
+            (entry.name for entry in reversed(chain[:-1]) if entry.level in {"city", "prefecture"}), None
+        )
+        county = matched.name if matched.level in {"county", "district"} else None
+        return RegionMatch(
+            province=province,
+            city=city,
+            county=county,
+            matched_text=matched_text,
+            path=tuple(entry.name for entry in chain),
+        )
+
 
 @dataclass(frozen=True)
 class IndustryProfile:

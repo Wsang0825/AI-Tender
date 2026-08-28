@@ -36,16 +36,17 @@ def record(**kwargs) -> TenderRecord:
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
-        ({"registration_start": "2026-08-27 09:00", "registration_deadline": "2026-09-01 17:00"}, TenderStatus.OPEN),
-        ({"document_start": "2026-08-28 09:00", "document_deadline": "2026-09-01 17:00"}, TenderStatus.OPEN),
-        ({"registration_start": "2026-08-20", "registration_deadline": "2026-08-27 17:00", "open_time": "2026-09-01 09:00"}, TenderStatus.CLOSED),
+        ({"registration_start": "2026-08-27 09:00", "registration_deadline": "2026-09-01 17:00", "bid_deadline": "2026-09-10 17:00"}, TenderStatus.OPEN),
+        ({"document_start": "2026-08-28 09:00", "document_deadline": "2026-09-01 17:00", "bid_deadline": "2026-09-10 17:00"}, TenderStatus.OPEN),
+        ({"registration_start": "2026-08-20", "registration_deadline": "2026-08-27 17:00", "bid_deadline": "2026-09-10 17:00", "open_time": "2026-09-10 09:00"}, TenderStatus.CLOSED),
         ({"qualification_deadline": "2026-08-27 17:00", "bid_deadline": "2026-09-10 17:00"}, TenderStatus.CLOSED),
         ({"document_deadline": "2026-08-27 17:00", "bid_deadline": "2026-09-10 17:00"}, TenderStatus.CLOSED),
         ({"open_time": "2026-08-27 17:00"}, TenderStatus.CLOSED),
         ({"bid_deadline": "2026-09-10 17:00", "open_time": "2026-09-11 09:00"}, TenderStatus.UNKNOWN),
-        ({"registration_start": "2026-09-01 09:00", "registration_deadline": "2026-09-10 17:00"}, TenderStatus.UNKNOWN),
+        ({"registration_start": "2026-09-01 09:00", "registration_deadline": "2026-09-10 17:00", "bid_deadline": "2026-09-20 17:00"}, TenderStatus.UNKNOWN),
         ({"registration_deadline": "2026-08-28 12:00"}, TenderStatus.CLOSED),
-        ({"qualification_start": "2026-08-28 09:00", "qualification_deadline": "2026-09-01 17:00"}, TenderStatus.UNKNOWN),
+        ({"qualification_start": "2026-08-28 09:00", "qualification_deadline": "2026-09-01 17:00", "bid_deadline": "2026-09-10 17:00"}, TenderStatus.UNKNOWN),
+        ({"bid_deadline": "2026-09-10 17:00", "open_time": "2026-09-11 09:00", "participation_method": "招标文件可在投标截止时间前自行下载"}, TenderStatus.OPEN),
     ],
 )
 def test_status_rules(kwargs, expected):
@@ -55,12 +56,12 @@ def test_status_rules(kwargs, expected):
 def test_record_recalculation_sets_status():
     item = record(registration_start="2026-08-27 09:00", registration_deadline="2026-09-01 17:00")
     assert item.status is TenderStatus.UNKNOWN
-    assert item.recalculate_status(NOW) is TenderStatus.OPEN
+    assert item.recalculate_status(NOW) is TenderStatus.UNKNOWN
 
 
 def test_extension_reopens_closed_record():
-    original = record(registration_deadline="2026-08-20 17:00")
-    extension = record(registration_deadline="2026-09-05 17:00")
+    original = record(registration_deadline="2026-08-20 17:00", bid_deadline="2026-09-10 17:00")
+    extension = record(registration_deadline="2026-09-05 17:00", bid_deadline="2026-09-10 17:00")
     assert recalculate_status(original, NOW).status is TenderStatus.CLOSED
     assert recalculate_status(extension, NOW).status is TenderStatus.OPEN
 

@@ -1,12 +1,24 @@
 version: 1
 config_version: 1
-description: 全国省级行政区划目录及西北默认搜索范围的城市层级
+description: 全国省级行政区划目录及当前已维护城市层级；具体搜索范围由 Search Profile 选择
 regions:
   - {region_code: CN-11, name: 北京市, short_name: 北京, aliases: [京], level: province}
   - {region_code: CN-12, name: 天津市, short_name: 天津, aliases: [津], level: province}
   - {region_code: CN-13, name: 河北省, short_name: 河北, aliases: [冀], level: province}
   - {region_code: CN-14, name: 山西省, short_name: 山西, aliases: [晋], level: province}
   - {region_code: CN-15, name: 内蒙古自治区, short_name: 内蒙古, aliases: [内蒙], level: province}
+  - {region_code: CN-1501, name: 呼和浩特市, short_name: 呼和浩特, aliases: [呼市], level: city, parent_code: CN-15}
+  - {region_code: CN-1502, name: 包头市, short_name: 包头, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1503, name: 乌海市, short_name: 乌海, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1504, name: 赤峰市, short_name: 赤峰, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1505, name: 通辽市, short_name: 通辽, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1506, name: 鄂尔多斯市, short_name: 鄂尔多斯, aliases: [鄂尔多斯地区], level: city, parent_code: CN-15}
+  - {region_code: CN-1507, name: 呼伦贝尔市, short_name: 呼伦贝尔, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1508, name: 巴彦淖尔市, short_name: 巴彦淖尔, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1509, name: 乌兰察布市, short_name: 乌兰察布, aliases: [], level: city, parent_code: CN-15}
+  - {region_code: CN-1522, name: 兴安盟, short_name: 兴安盟, aliases: [], level: prefecture, parent_code: CN-15}
+  - {region_code: CN-1525, name: 锡林郭勒盟, short_name: 锡林郭勒, aliases: [锡盟], level: prefecture, parent_code: CN-15}
+  - {region_code: CN-1529, name: 阿拉善盟, short_name: 阿拉善, aliases: [], level: prefecture, parent_code: CN-15}
   - {region_code: CN-21, name: 辽宁省, short_name: 辽宁, aliases: [辽], level: province}
   - {region_code: CN-22, name: 吉林省, short_name: 吉林, aliases: [吉], level: province}
   - {region_code: CN-23, name: 黑龙江省, short_name: 黑龙江, aliases: [黑], level: province}

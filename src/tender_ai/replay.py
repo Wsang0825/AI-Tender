@@ -10,14 +10,15 @@ from typing import Any
 from bs4 import BeautifulSoup
 from sqlalchemy import select
 
-from tender_ai.config_loader import RegionRegistry
-from tender_ai.extractors.tender import normalize_detail
+from tender_ai.config_loader import load_region_catalog
+from tender_ai.documents.parser import ParsedDocument, parse_path
+from tender_ai.extractors.runner import ExtractionSummary, _save_extraction, _upsert_document_parse
+from tender_ai.extractors.tender import ExtractionResult, normalize_detail
 from tender_ai.sources.contracts import DetailPayload
 from tender_ai.sources.registry import SourceDefinition, SourceRegistry
 from tender_ai.status.time import now_shanghai
 from tender_ai.storage.database import create_engine_for, initialize_database, session_scope
 from tender_ai.storage.models import Announcement, Snapshot
-from tender_ai.storage.repository import save_tender_record
 
 
 @dataclass
@@ -38,24 +39,29 @@ class ReplaySummary:
         }
 
 
-def _payload_from_snapshot(snapshot: Snapshot) -> DetailPayload:
+def _payload_from_snapshot(snapshot: Snapshot) -> tuple[DetailPayload, ParsedDocument]:
+    document = parse_path(
+        snapshot.file_path,
+        source_url=snapshot.source_url,
+        content_type=snapshot.content_type,
+        expected_terms=("报名", "获取", "投标", "开标", "截止"),
+    )
     content = Path(snapshot.file_path).read_bytes()
     content_type = snapshot.content_type.lower()
     if "json" in content_type:
         try:
             parsed = json.loads(content.decode("utf-8", errors="replace"))
             title = str(parsed.get("title") or parsed.get("projectname") or snapshot.source_url) if isinstance(parsed, dict) else snapshot.source_url
-            text = json.dumps(parsed, ensure_ascii=False, default=str)
-            return DetailPayload(title=title, url=snapshot.source_url, text=text, metadata=parsed if isinstance(parsed, dict) else {})
+            return DetailPayload(title=title, url=snapshot.source_url, text=document.text, metadata=parsed if isinstance(parsed, dict) else {}), document
         except json.JSONDecodeError:
             pass
-    html = content.decode("utf-8", errors="replace")
-    soup = BeautifulSoup(html, "lxml")
-    title = (soup.select_one("h1") or soup.select_one("title"))
+    html = content.decode("utf-8", errors="replace") if "html" in content_type else ""
+    soup = BeautifulSoup(html, "lxml") if html else None
+    title = (soup.select_one("h1") or soup.select_one("title")) if soup else None
     title_text = title.get_text(" ", strip=True) if title else snapshot.source_url
-    for node in soup(["script", "style", "noscript"]):
-        node.decompose()
-    return DetailPayload(title=title_text, url=snapshot.source_url, html=html, text=soup.get_text(" ", strip=True))
+    if not title_text and document.text:
+        title_text = document.text.splitlines()[0][:500]
+    return DetailPayload(title=title_text, url=snapshot.source_url, html=html, text=document.text), document
 
 
 class ReplayRunner:
@@ -64,7 +70,7 @@ class ReplayRunner:
 
     def run(self, *, announcement_id: int | None = None, source_id: str | None = None, dry_run: bool = False) -> ReplaySummary:
         registry = SourceRegistry.from_file()
-        regions = RegionRegistry.from_file()
+        regions = load_region_catalog()
         summary = ReplaySummary(dry_run=dry_run, errors=[])
         with session_scope(self.engine) as session:
             query = select(Snapshot).order_by(Snapshot.captured_at)
@@ -76,12 +82,19 @@ class ReplayRunner:
             summary.snapshot_count = len(snapshots)
             for snapshot in snapshots:
                 try:
-                    payload = _payload_from_snapshot(snapshot)
+                    payload, document = _payload_from_snapshot(snapshot)
                     if snapshot.source_id:
                         definition = registry.get(snapshot.source_id)
                     else:
                         definition = SourceDefinition(source_id="replay", source_name="Snapshot Replay", category="discovered", base_url=payload.url)
-                    extraction = normalize_detail(payload, definition, regions)
+                    extraction = normalize_detail(
+                        payload,
+                        definition,
+                        regions,
+                        document=document,
+                        source_file=document.source_file,
+                        parser=document.parser,
+                    )
                     if not dry_run:
                         announcement = session.get(Announcement, snapshot.announcement_id) if snapshot.announcement_id else None
                         if announcement is not None:
@@ -90,12 +103,32 @@ class ReplayRunner:
                             extraction.record.original_url = announcement.original_url or payload.url
                             extraction.record.canonical_url = announcement.canonical_url
                             extraction.record.content_hash = snapshot.sha256
-                        save_tender_record(session, extraction.record, status_reason=extraction.record.status_reason, change_type="change")
-                        if announcement is not None:
-                            announcement.clean_text = payload.text or payload.html
-                            announcement.raw_content = announcement.clean_text[:2_000_000]
+                            announcement.clean_text = document.text or payload.html
+                            announcement.raw_content = (payload.html or document.text)[:2_000_000]
                             announcement.content_hash = snapshot.sha256
                             announcement.created_at = announcement.created_at or now_shanghai()
+                        _upsert_document_parse(
+                            session,
+                            announcement_id=snapshot.announcement_id,
+                            attachment_id=None,
+                            document=document,
+                            content_hash_value=snapshot.sha256,
+                            project_id=announcement.project_id if announcement is not None else extraction.record.project_id,
+                            source_id=snapshot.source_id,
+                        )
+                        summary_row = ExtractionSummary()
+                        _save_extraction(
+                            session,
+                            announcement,
+                            extraction,
+                            summary_row,
+                            source_id=snapshot.source_id,
+                            dry_run=False,
+                        ) if announcement is not None else None
+                        if announcement is None:
+                            from tender_ai.storage.repository import save_tender_record
+
+                            save_tender_record(session, extraction.record, status_reason=extraction.record.status_reason, change_type="change")
                     summary.replayed_count += 1
                 except Exception as exc:
                     summary.failed_count += 1

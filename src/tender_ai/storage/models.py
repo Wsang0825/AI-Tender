@@ -22,6 +22,8 @@ class Project(Base):
 
     project_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     project_name: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    raw_project_name: Mapped[str | None] = mapped_column(String(500))
+    canonical_project_name: Mapped[str | None] = mapped_column(String(500), index=True)
     province: Mapped[str | None] = mapped_column(String(64), index=True)
     city: Mapped[str | None] = mapped_column(String(128), index=True)
     county: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -68,7 +70,22 @@ class Project(Base):
     favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     ignored: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     ignore_reason: Mapped[str | None] = mapped_column(Text)
+    document_quality_score: Mapped[float | None] = mapped_column(Float)
+    extraction_version: Mapped[str | None] = mapped_column(String(64))
+    extraction_method: Mapped[str | None] = mapped_column(String(128))
+    last_extracted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    verification_required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    verification_reason: Mapped[str | None] = mapped_column(Text)
+    llm_extracted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    field_confidence: Mapped[float | None] = mapped_column(Float)
+    source_confidence: Mapped[float | None] = mapped_column(Float)
+    project_match_confidence: Mapped[float | None] = mapped_column(Float)
+    overall_confidence: Mapped[float | None] = mapped_column(Float)
+    completeness_score: Mapped[float | None] = mapped_column(Float)
+    needs_codex_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    review_reason: Mapped[str | None] = mapped_column(Text)
+    status_rule_version: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
 
@@ -88,6 +105,11 @@ class Announcement(Base):
     raw_content: Mapped[str | None] = mapped_column(Text)
     clean_text: Mapped[str | None] = mapped_column(Text)
     snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("snapshots.snapshot_id"), index=True)
+    extraction_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    extraction_parser: Mapped[str | None] = mapped_column(String(128))
+    document_quality_score: Mapped[float | None] = mapped_column(Float)
+    extraction_version: Mapped[str | None] = mapped_column(String(64))
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
 
@@ -171,9 +193,15 @@ class Evidence(Base):
     raw_value: Mapped[str | None] = mapped_column(Text)
     source_url: Mapped[str | None] = mapped_column(Text)
     source_file: Mapped[str | None] = mapped_column(Text)
+    snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("snapshots.snapshot_id"), index=True)
+    document_id: Mapped[str | None] = mapped_column(String(64), index=True)
     page_number: Mapped[int | None] = mapped_column(Integer)
+    sheet_name: Mapped[str | None] = mapped_column(String(256))
+    cell_range: Mapped[str | None] = mapped_column(String(256))
     source_text: Mapped[str] = mapped_column(Text, nullable=False)
     extractor: Mapped[str] = mapped_column(String(128), nullable=False)
+    extractor_type: Mapped[str | None] = mapped_column(String(64))
+    extractor_version: Mapped[str | None] = mapped_column(String(64))
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
@@ -326,6 +354,9 @@ class ManualOverride(Base):
     field_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     old_value: Mapped[str | None] = mapped_column(Text)
     new_value: Mapped[str | None] = mapped_column(Text)
+    automatic_value: Mapped[str | None] = mapped_column(Text)
+    manual_value: Mapped[str | None] = mapped_column(Text)
+    changed_by: Mapped[str] = mapped_column(String(32), nullable=False, default="USER")
     changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     reason: Mapped[str | None] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
@@ -342,6 +373,160 @@ class LLMExtractionCache(Base):
     schema_version: Mapped[str] = mapped_column(String(128), nullable=False)
     response_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class DocumentParse(Base):
+    __tablename__ = "document_parses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=lambda: uuid4().hex)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.project_id"), index=True)
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
+    document_type: Mapped[str | None] = mapped_column(String(64))
+    file_path: Mapped[str | None] = mapped_column(Text)
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    source_url: Mapped[str | None] = mapped_column(Text)
+    source_file: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    parser: Mapped[str] = mapped_column(String(128), nullable=False)
+    parser_version: Mapped[str | None] = mapped_column(String(64))
+    quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    text_length: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    used_ocr: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    used_mineru: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    parse_status: Mapped[str] = mapped_column(String(32), nullable=False, default="SUCCESS", index=True)
+    error: Mapped[str | None] = mapped_column(Text)
+    parse_error: Mapped[str | None] = mapped_column(Text)
+    clean_text_path: Mapped[str | None] = mapped_column(Text)
+    markdown_path: Mapped[str | None] = mapped_column(Text)
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    extracted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class TimelineEvent(Base):
+    __tablename__ = "timeline_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    deadline_snapshot_json: Mapped[str | None] = mapped_column(Text)
+    evidence_ids_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class VerificationTask(Base):
+    __tablename__ = "verification_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    query_texts_json: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
+
+
+class VerificationResult(Base):
+    __tablename__ = "verification_results"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("verification_tasks.id"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    query_text: Mapped[str] = mapped_column(String(500), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(64))
+    published_at: Mapped[str | None] = mapped_column(String(64))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class FieldConflict(Base):
+    __tablename__ = "field_conflicts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    field_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    candidate_values_json: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_ids_json: Mapped[str | None] = mapped_column(Text)
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    resolution_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    resolution: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SearchSession(Base):
+    __tablename__ = "search_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="RUNNING", index=True)
+    query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    open_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unknown_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    closed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    errors_json: Mapped[str | None] = mapped_column(Text)
+    sources_json: Mapped[str | None] = mapped_column(Text)
+
+
+class SearchSessionProject(Base):
+    __tablename__ = "search_session_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("search_sessions.session_id"), nullable=False, index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    found_via: Mapped[str | None] = mapped_column(String(64))
+    match_score: Mapped[float | None] = mapped_column(Float)
+    matched_keywords: Mapped[str | None] = mapped_column(Text)
+    matched_region: Mapped[str | None] = mapped_column(String(256))
+    status_at_search: Mapped[str] = mapped_column(String(16), nullable=False)
+    is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_updated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class CodexReviewItem(Base):
+    __tablename__ = "codex_review_items"
+
+    review_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    search_session_id: Mapped[str | None] = mapped_column(ForeignKey("search_sessions.session_id"), index=True)
+    review_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5, index=True)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("snapshots.snapshot_id"), index=True)
+    document_paths: Mapped[str | None] = mapped_column(Text)
+    candidate_values: Mapped[str | None] = mapped_column(Text)
+    evidence_ids: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    review_schema_version: Mapped[str] = mapped_column(String(64), nullable=False, default="codex_review_v1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolution: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING", index=True)
 
 
 class SystemMetadata(Base):
@@ -370,5 +555,13 @@ __all__ = [
     "TimeFieldMetadata",
     "ManualOverride",
     "LLMExtractionCache",
+    "DocumentParse",
+    "TimelineEvent",
+    "VerificationTask",
+    "VerificationResult",
+    "FieldConflict",
+    "SearchSession",
+    "SearchSessionProject",
+    "CodexReviewItem",
     "SystemMetadata",
 ]

@@ -1,4 +1,4 @@
-"""可替换 LLM Provider 接口；业务层不直接依赖任何 SDK。"""
+"""历史 Provider 协议；当前主路径禁用，智能层由 Codex 承担。"""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 version: 1
-description: 西北五省及新疆生产建设兵团行政区划检索树
+description: 当前已维护来源的行政区划别名树；全国基础目录见 region_catalog.yaml，Search Profile 负责选择范围
 provinces:
   - name: 陕西
     aliases: [陕西省]

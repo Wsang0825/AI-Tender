@@ -23,7 +23,7 @@ class TimeMetadata:
 
 
 _CLOCK_RE = re.compile(r"\d{1,2}\s*(?::|：|点|时)|上午|下午|晚上|AM|PM", re.I)
-_RANGE_RE = re.compile(r"至|到|[-~～]", re.I)
+_RANGE_RE = re.compile(r"(?<!截)至|到|~|～|(?<=\s)-(?=\s)", re.I)
 
 
 def describe_time(field_name: str, value: Any, raw_value: Any = None, *, source_evidence_id: int | None = None) -> TimeMetadata | None:
@@ -37,7 +37,7 @@ def describe_time(field_name: str, value: Any, raw_value: Any = None, *, source_
         precision = "DATETIME"
     else:
         precision = "DATE_ONLY"
-    inferred = precision != "DATETIME"
+    inferred = precision == "DATE_ONLY"
     return TimeMetadata(
         field_name=field_name,
         value=normalized,

@@ -373,6 +373,7 @@ class CrawlRunner:
         max_items: int = 20,
         query_terms: tuple[str, ...] | None = None,
         download_attachments: bool = True,
+        only_active_opportunities: bool | None = None,
     ) -> CrawlSummary:
         profile = load_search_profiles().get(profile_id)
         registry = SourceRegistry.from_file()
@@ -446,7 +447,15 @@ class CrawlRunner:
                             crawl_run.items_seen += 1
                             crawl_run.checkpoint = canonical
                             try:
-                                self._save_item(session, definition, adapter, item, source_summary, download_attachments=download_attachments, only_active_opportunities=profile.only_active_opportunities)
+                                self._save_item(
+                                    session,
+                                    definition,
+                                    adapter,
+                                    item,
+                                    source_summary,
+                                    download_attachments=download_attachments,
+                                    only_active_opportunities=profile.only_active_opportunities if only_active_opportunities is None else only_active_opportunities,
+                                )
                             except Exception as exc:
                                 source_summary.failures += 1
                                 source_summary.health_reason = _health_reason(exc)
@@ -560,7 +569,7 @@ class CrawlRunner:
             "| 状态原因码与时间元数据 | DONE | 内部原因码、时区、精度和推断标记 |",
             "| SQLite WAL/FTS5/幂等运行 | DONE | FTS5 不可用时保留 LIKE fallback |",
             "| Source Health 与 recrawl 字段 | DONE | 健康原因、连续失败、零结果怀疑标记 |",
-            "| LLM Provider 与缓存 | DEFERRED | 按原计划第4步实现，数据库字段与接口预留 |",
+            "| Codex Review 交接 | DONE | Python 不调用任何 AI API；复杂记录输出 Snapshot/Evidence/Review 文件，由 Codex 按需阅读和写回 |",
             "| Web 设置页、关注/忽略和人工修正 UI | DEFERRED | 按原计划第5步实现，数据库基础字段已预留 |",
             "",
             "## 说明",
