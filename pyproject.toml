@@ -46,6 +46,9 @@ dependencies = [
     "loguru",
 ]
 
+[project.scripts]
+tender-ai = "tender_ai.cli.main:app"
+
 [project.optional-dependencies]
 test = [
     "pytest",

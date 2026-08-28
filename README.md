@@ -17,3 +17,15 @@
 ```
 
 环境安装、实际工具测试和参考仓库清单见 [SETUP_REPORT.md](../SETUP_REPORT.md)。
+## 第二阶段核心框架
+
+当前版本只提供核心领域模型和本地基础设施，不执行大规模网站抓取：
+
+```powershell
+python -m tender_ai doctor
+python -m tender_ai init-db
+python -m tender_ai recalc
+python -m tender_ai sources
+```
+
+数据库默认位于 `D:\AI-Tender\data\tender.db`。来源注册表在 `config/sources.yaml`，所有重要字段应通过 `evidence` 表保留原始证据。
