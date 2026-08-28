@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-tender"
+version = "0.1.0"
+description = "Personal local environment for a Northwest China renewable-energy tender discovery system"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "scrapling[fetchers]",
+    "crawl4ai",
+    "ddgs",
+    # 1.28.x + pymupdf-layout cannot load on this host's current page-file budget.
+    "pymupdf==1.27.2",
+    "pymupdf4llm==0.3.4",
+    "python-docx",
+    "openpyxl",
+    "pandas",
+    "xlsxwriter",
+    "pydantic",
+    "pydantic-settings",
+    "sqlalchemy",
+    "alembic",
+    "rapidfuzz",
+    "diskcache",
+    "dateparser",
+    "python-dateutil",
+    "tenacity",
+    "httpx",
+    "requests",
+    "beautifulsoup4",
+    "lxml",
+    "pyyaml",
+    "orjson",
+    "selectolax",
+    "charset-normalizer",
+    "fastapi",
+    "uvicorn",
+    "jinja2",
+    "python-multipart",
+    "aiofiles",
+    "typer",
+    "rich",
+    "loguru",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+]
+drissionpage = ["DrissionPage"]
+mineru = ["mineru[all]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+asyncio_mode = "auto"
