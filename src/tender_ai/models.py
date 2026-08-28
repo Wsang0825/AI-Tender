@@ -10,11 +10,12 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from tender_ai.status.engine import TenderStatus
-from tender_ai.status.time import parse_datetime
+from tender_ai.status.time import as_shanghai, now_shanghai, parse_datetime
 
 
 TIME_FIELDS = (
     "publish_time",
+    "status_evaluated_at",
     "qualification_start",
     "qualification_deadline",
     "registration_start",
@@ -68,9 +69,16 @@ class TenderRecord(BaseModel):
     source_type: str | None = None
     source_level: str | None = None
     source_url: str | None = None
+    original_url: str | None = None
+    canonical_url: str | None = None
+    content_hash: str | None = None
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
     status: TenderStatus = TenderStatus.UNKNOWN
+    status_reason: str | None = None
+    status_evaluated_at: datetime | None = None
+    lifecycle_state: str = "NEW"
+    last_change_at: datetime | None = None
     confidence_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @field_validator(*TIME_FIELDS, mode="before")
@@ -92,4 +100,6 @@ class TenderRecord(BaseModel):
 
         decision = recalculate_status(self, now)
         self.status = decision.status
+        self.status_reason = decision.reason_code
+        self.status_evaluated_at = as_shanghai(now) if now is not None else now_shanghai()
         return self.status

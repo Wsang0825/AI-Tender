@@ -10,8 +10,12 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: ccgp
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 2
+    request_delay_seconds: 0.3
     notes: 政府采购公告主来源
   - source_id: ggzy
     source_name: 全国公共资源交易平台
@@ -22,20 +26,26 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: ggzy_national
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 公共资源交易公告聚合入口
   - source_id: cebpubservice
     source_name: 中国招标投标公共服务平台
     category: national
-    base_url: https://www.cebpubservice.com/
+    base_url: https://bulletin.cebpubservice.com/
     region: 全国
     enabled: true
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: cebpubservice
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 招标投标公共服务平台
   - source_id: plap
     source_name: 军队采购网
@@ -100,15 +110,33 @@ sources:
   - source_id: shaanxi_ggzy
     source_name: 陕西省公共资源交易中心
     category: regional
-    base_url: https://ggzy.shaanxi.gov.cn/
+    base_url: https://www.sxggzyjy.cn/
     region: 陕西
     enabled: true
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: shaanxi_ggzy
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 陕西区域来源
+  - source_id: ccgp_shaanxi
+    source_name: Shaanxi Government Procurement
+    category: regional
+    base_url: https://www.ccgp-shaanxi.gov.cn/
+    region: Shaanxi
+    enabled: true
+    priority: 2
+    access_method: http_public
+    requires_login: false
+    adapter: ccgp_shaanxi
+    adapter_level: API
+    status: NEEDS_ATTENTION
+    crawl_enabled: true
+    max_pages: 1
+    notes: Public listing currently requires a dynamic captcha; adapter does not bypass it
   - source_id: gansu_ggzy
     source_name: 甘肃省公共资源交易中心
     category: regional
@@ -118,9 +146,27 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: gansu_ggzy
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 甘肃区域来源
+  - source_id: gsei
+    source_name: Gansu Economic Information Network
+    category: regional
+    base_url: https://www.gsei.com.cn/
+    region: Gansu
+    enabled: true
+    priority: 1
+    access_method: http_public
+    requires_login: false
+    adapter: gsei
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
+    notes: Public categories 1336, 1662 and 1657
   - source_id: qinghai_ggzy
     source_name: 青海省公共资源交易中心
     category: regional
@@ -130,21 +176,42 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: qinghai_ggzy
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 青海区域来源
   - source_id: ningxia_ggzy
     source_name: 宁夏公共资源交易中心
     category: regional
-    base_url: https://ggzyjy.nx.gov.cn/
+    base_url: https://ggzyjy.fzggw.nx.gov.cn/
     region: 宁夏
     enabled: true
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: ningxia_ggzy
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 宁夏区域来源
+  - source_id: ccgp_ningxia
+    source_name: Ningxia Government Procurement
+    category: regional
+    base_url: https://www.ccgp-ningxia.gov.cn/public/NXGPPNEW/dynamic/
+    region: Ningxia
+    enabled: true
+    priority: 2
+    access_method: http_public
+    requires_login: false
+    adapter: ccgp_ningxia
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
+    notes: Public static government procurement listing
   - source_id: xinjiang_ggzy
     source_name: 新疆公共资源交易网
     category: regional
@@ -154,8 +221,11 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: xinjiang_ggzy
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 新疆区域来源
   - source_id: xinjiang_bingtuan_ggzy
     source_name: 新疆生产建设兵团公共资源交易中心
@@ -166,8 +236,11 @@ sources:
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
+    adapter: bingtuan_ggzy
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
     notes: 兵团区域来源
   - source_id: spic
     source_name: 国家电投

@@ -25,7 +25,16 @@ class SourceDefinition(BaseModel):
     access_method: str = "http_public"
     requires_login: bool = False
     adapter: str = "configured"
+    adapter_level: str = "CUSTOM_HTTP"
+    adapter_config: str | None = None
     status: str = "registry_only"
+    crawl_enabled: bool = False
+    max_pages: int = Field(default=2, ge=1, le=100)
+    request_delay_seconds: float = Field(default=0.2, ge=0.0, le=60.0)
+    crawl_interval: int = Field(default=86400, ge=0)
+    rate_limit: float = Field(default=0.2, ge=0.0, le=60.0)
+    lookback_days: int = Field(default=30, ge=1, le=3650)
+    browser_profile_path: str | None = None
     notes: str | None = None
 
 
@@ -80,7 +89,18 @@ class SourceRegistry:
 
     def adapters(self, *, enabled_only: bool = True) -> list[SourceAdapter]:
         definitions = self.enabled() if enabled_only else self.definitions
-        return [ConfiguredSourceAdapter(item) for item in definitions]
+        from tender_ai.sources.adapters import build_adapter
+
+        # 保留旧版调用方对“仅登记来源”适配器的兼容性；真实抓取运行器按配置直接构造适配器。
+        ordered = sorted(definitions, key=lambda item: (item.crawl_enabled, item.priority, item.source_id))
+        return [build_adapter(item) for item in ordered]
 
     def health_check(self) -> list[AdapterHealth]:
-        return [adapter.health_check() for adapter in self.adapters()]
+        adapters = self.adapters()
+        try:
+            return [adapter.health_check() for adapter in adapters]
+        finally:
+            for adapter in adapters:
+                close = getattr(adapter, "close", None)
+                if close:
+                    close()

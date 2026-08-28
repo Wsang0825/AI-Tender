@@ -1,31 +1,30 @@
 # AI-Tender
 
-西北五省新能源招投标自动搜索系统的个人本地项目。
-
-当前阶段只完成开发环境、浏览器、依赖、参考仓库和可运行性验证，不实现招投标业务逻辑。
+区域新能源招投标自动搜索系统的个人本地项目。系统范围由 Search Profile 配置，默认 Profile 为 `northwest_energy`；更换地区、行业或来源不需要修改爬虫代码。
 
 ## 目录
 
-- `src/tender_ai/`：主程序包骨架，按后续采集、发现、文档、证据和存储职责拆分
-- `config/`：配置文件目录
-- `tests/`：项目测试目录
+- `src/tender_ai/`：采集、Discovery、解析、证据、快照、状态和存储模块
+- `config/search_profiles.yaml`：搜索范围、来源、预算和时间范围
+- `config/industry_profiles.yaml`：行业关键词组、同义词和排除词
+- `config/region_catalog.yaml`：独立行政区划目录
+- `config/source_adapters/`：声明式 Generic HTML Adapter 配置
+- `tests/`：离线单元测试与架构契约测试
 
-统一工作目录为 `D:\AI-Tender`，虚拟环境为 `D:\AI-Tender.venv`。加载当前 PowerShell 环境：
-
-```powershell
-. D:\AI-Tender\env.ps1
-```
-
-环境安装、实际工具测试和参考仓库清单见 [SETUP_REPORT.md](../SETUP_REPORT.md)。
-## 第二阶段核心框架
-
-当前版本只提供核心领域模型和本地基础设施，不执行大规模网站抓取：
+## 常用命令
 
 ```powershell
 python -m tender_ai doctor
 python -m tender_ai init-db
+python -m tender_ai crawl
+python -m tender_ai crawl --profile northwest_energy --dry-run
+python -m tender_ai discovery
+python -m tender_ai discovery --dry-run
+python -m tender_ai replay --source SOURCE_ID
 python -m tender_ai recalc
 python -m tender_ai sources
 ```
 
-数据库默认位于 `D:\AI-Tender\data\tender.db`。来源注册表在 `config/sources.yaml`，所有重要字段应通过 `evidence` 表保留原始证据。
+数据库默认位于 `D:\AI-Tender\data\tender.db`，附件位于 `D:\AI-Tender\downloads`，候选公告快照位于 `D:\AI-Tender\data\snapshots`。
+
+状态对用户显示为 `OPEN`、`UNKNOWN`、`CLOSED`，数据库另存 `status_reason`、时间精度和来源证据。FTS5 可用时支持全文搜索，不可用时自动回退到 `LIKE`。

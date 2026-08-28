@@ -1,0 +1,26 @@
+version: 1
+config_version: 1
+description: 区域新能源招投标自动搜索系统的可配置搜索范围
+profiles:
+  - profile_id: northwest_energy
+    name: 西北新能源（默认）
+    enabled: true
+    regions: [CN-61, CN-62, CN-63, CN-64, CN-65, CN-XJBT]
+    excluded_regions: []
+    industry_groups: [renewable_general, solar, storage, epc, equipment, grid]
+    include_keywords: [新能源, 光伏, 储能, 风电]
+    exclude_keywords: [太阳能热水器, 户用热水器维修]
+    source_categories: [national, regional, enterprise]
+    included_sources: []
+    excluded_sources: []
+    announcement_types: []
+    lookback_days: 30
+    discovery_enabled: true
+    wechat_discovery_enabled: true
+    max_search_queries_per_run: 48
+    max_queries_per_run: 48
+    max_queries_per_day: 200
+    max_results_per_query: 8
+    only_active_opportunities: false
+    min_source_level: E
+    schedule_enabled: false

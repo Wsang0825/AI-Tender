@@ -1,0 +1,19 @@
+version: 1
+adapter:
+  list_url: https://example.com/not-enabled-list.html
+  search_url: https://example.com/search.html
+  request_method: GET
+  query_parameters:
+    category: tender
+  list_item_selector: "ul.notice-list > li"
+  title_selector: "a.title"
+  url_selector: "a.title"
+  publish_date_selector: ".date"
+  pagination_type: page_parameter
+  page_parameter: page
+  detail_content_selector: ".article-content"
+  attachment_selector: "a[href]"
+  next_page_selector: "a.next"
+  encoding: utf-8
+  rate_limit: 0.5
+  browser_required: false

@@ -1,0 +1,59 @@
+version: 1
+config_version: 1
+industry_groups:
+  - group_id: renewable_general
+    name: 新能源总览
+    include: [新能源, 可再生能源, 清洁能源]
+    exclude: []
+    synonyms: [能源转型, 绿色能源]
+    aliases: [新能源项目]
+    priority: 1
+  - group_id: solar
+    name: 光伏
+    include: [光伏, 太阳能发电, 分布式光伏, 集中式光伏]
+    exclude: [太阳能热水器, 户用热水器维修]
+    synonyms: [光伏发电, 光伏电站, 光伏组件]
+    aliases: [PV]
+    priority: 1
+  - group_id: storage
+    name: 储能
+    include: [储能, 独立储能, 电化学储能, 共享储能]
+    exclude: []
+    synonyms: [储能系统, 储能电站, 储能电池]
+    aliases: [PCS, EMS, BMS]
+    priority: 1
+  - group_id: epc
+    name: 工程与总承包
+    include: [EPC, PC, 工程总承包, 施工, 安装, 设计, 勘察设计, 监理, 运维]
+    exclude: []
+    synonyms: [总承包, 建设工程]
+    aliases: []
+    priority: 2
+  - group_id: equipment
+    name: 新能源设备
+    include: [光伏组件, 光伏支架, 固定支架, 跟踪支架, 逆变器, 储能系统, 储能电池, PCS, EMS, BMS]
+    exclude: []
+    synonyms: [箱变, 变压器, 升压站, 开关站, 电缆]
+    aliases: []
+    priority: 2
+  - group_id: grid
+    name: 电网与并网
+    include: [电力工程, 送出工程, 输变电, 并网, 升压站, 变电站, 电网接入]
+    exclude: []
+    synonyms: [汇流箱, 开关柜]
+    aliases: []
+    priority: 2
+  - group_id: wind_power
+    name: 风电（可选）
+    include: [风电, 风力发电, 风机]
+    exclude: []
+    synonyms: [风电场, 风力发电机组]
+    aliases: [风能]
+    priority: 3
+  - group_id: charging_station
+    name: 充换电（可选）
+    include: [充电站, 充换电, 充电桩]
+    exclude: []
+    synonyms: [电动汽车充电]
+    aliases: []
+    priority: 4

@@ -5,13 +5,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 import yaml
 
 
 APP_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_DIR = APP_ROOT / "config"
+
+
+def _as_tuple(value: Any, *, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value.strip(),) if value.strip() else ()
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field_name} 必须是字符串列表")
+    return tuple(item.strip() for item in value if item.strip())
 
 
 def load_yaml(filename: str, config_dir: Path | None = None) -> dict[str, Any]:
@@ -54,6 +64,165 @@ class RegionMatch:
     county: str | None = None
     matched_text: str = ""
     path: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RegionEntry:
+    region_code: str
+    name: str
+    short_name: str | None = None
+    aliases: tuple[str, ...] = ()
+    level: str = "province"
+    parent_code: str | None = None
+
+
+class RegionCatalog:
+    """独立的行政区划目录；搜索范围由 SearchProfile 选择 code。"""
+
+    def __init__(self, entries: Iterable[RegionEntry]):
+        self.entries = tuple(entries)
+        self._by_code = {entry.region_code: entry for entry in self.entries}
+        if len(self._by_code) != len(self.entries):
+            raise ValueError("region_catalog.yaml 存在重复 region_code")
+
+    @classmethod
+    def from_file(cls, path: Path | None = None) -> "RegionCatalog":
+        target = path or (DEFAULT_CONFIG_DIR / "region_catalog.yaml")
+        payload = load_yaml(target.name, target.parent)
+        raw_entries = payload.get("regions") or []
+        if not isinstance(raw_entries, list):
+            raise ValueError("region_catalog.yaml 的 regions 必须是列表")
+        entries = []
+        for item in raw_entries:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"地区目录项必须是对象: {item!r}")
+            entries.append(
+                RegionEntry(
+                    region_code=str(item["region_code"]),
+                    name=str(item["name"]),
+                    short_name=str(item.get("short_name") or item["name"]),
+                    aliases=_as_tuple(item.get("aliases"), field_name="aliases"),
+                    level=str(item.get("level") or "province"),
+                    parent_code=str(item["parent_code"]) if item.get("parent_code") else None,
+                )
+            )
+        return cls(entries)
+
+    def get(self, region_code: str) -> RegionEntry:
+        try:
+            return self._by_code[region_code]
+        except KeyError as exc:
+            raise KeyError(f"未知行政区划 code: {region_code}") from exc
+
+    def descendants(self, region_code: str) -> tuple[RegionEntry, ...]:
+        result: list[RegionEntry] = []
+        pending = [region_code]
+        while pending:
+            parent = pending.pop()
+            children = [entry for entry in self.entries if entry.parent_code == parent]
+            result.extend(children)
+            pending.extend(entry.region_code for entry in children)
+        return tuple(result)
+
+    def selected(self, codes: Iterable[str], excluded: Iterable[str] = ()) -> tuple[RegionEntry, ...]:
+        excluded_set = set(excluded)
+        selected_codes = set(codes)
+        for code in tuple(selected_codes):
+            selected_codes.update(item.region_code for item in self.descendants(code))
+        return tuple(
+            entry
+            for entry in self.entries
+            if entry.region_code in selected_codes and entry.region_code not in excluded_set
+        )
+
+
+@dataclass(frozen=True)
+class IndustryProfile:
+    group_id: str
+    name: str
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    synonyms: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    priority: int = 5
+
+    @property
+    def terms(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((*self.include, *self.synonyms, *self.aliases)))
+
+
+@dataclass(frozen=True)
+class SearchProfile:
+    profile_id: str
+    name: str
+    enabled: bool = True
+    regions: tuple[str, ...] = ()
+    excluded_regions: tuple[str, ...] = ()
+    industry_groups: tuple[str, ...] = ()
+    include_keywords: tuple[str, ...] = ()
+    exclude_keywords: tuple[str, ...] = ()
+    source_categories: tuple[str, ...] = ()
+    included_sources: tuple[str, ...] = ()
+    excluded_sources: tuple[str, ...] = ()
+    announcement_types: tuple[str, ...] = ()
+    lookback_days: int = 30
+    discovery_enabled: bool = True
+    wechat_discovery_enabled: bool = True
+    max_search_queries_per_run: int = 48
+    max_queries_per_run: int | None = None
+    max_queries_per_day: int = 200
+    max_results_per_query: int = 8
+    only_active_opportunities: bool = False
+    min_source_level: str = "E"
+    schedule_enabled: bool = False
+
+    @property
+    def query_budget(self) -> int:
+        return self.max_queries_per_run or self.max_search_queries_per_run
+
+    def allows_source(self, source_id: str, category: str | None = None) -> bool:
+        if self.included_sources and source_id not in self.included_sources:
+            return False
+        if source_id in self.excluded_sources:
+            return False
+        return not self.source_categories or (category in self.source_categories)
+
+
+class IndustryCatalog:
+    def __init__(self, profiles: Iterable[IndustryProfile]):
+        self.profiles = tuple(profiles)
+        self._by_id = {item.group_id: item for item in self.profiles}
+        if len(self._by_id) != len(self.profiles):
+            raise ValueError("industry_profiles.yaml 存在重复 group_id")
+
+    def get(self, group_id: str) -> IndustryProfile:
+        try:
+            return self._by_id[group_id]
+        except KeyError as exc:
+            raise KeyError(f"未知行业关键词组: {group_id}") from exc
+
+    def terms_for(self, group_ids: Iterable[str]) -> tuple[str, ...]:
+        terms: list[str] = []
+        for group_id in group_ids:
+            terms.extend(self.get(group_id).terms)
+        return tuple(dict.fromkeys(terms))
+
+
+class SearchProfileRegistry:
+    def __init__(self, profiles: Iterable[SearchProfile]):
+        self.profiles = tuple(profiles)
+        self._by_id = {item.profile_id: item for item in self.profiles}
+        if len(self._by_id) != len(self.profiles):
+            raise ValueError("search_profiles.yaml 存在重复 profile_id")
+
+    def get(self, profile_id: str = "northwest_energy") -> SearchProfile:
+        try:
+            return self._by_id[profile_id]
+        except KeyError as exc:
+            raise KeyError(f"未知 Search Profile: {profile_id}") from exc
+
+    def enabled(self) -> list[SearchProfile]:
+        return [item for item in self.profiles if item.enabled]
 
 
 class RegionRegistry:
@@ -138,3 +307,74 @@ def load_keyword_catalog(config_dir: Path | None = None) -> dict[str, list[str]]
         seen.update(result[str(category)])
     result["all"] = sorted(seen)
     return result
+
+
+def load_region_catalog(config_dir: Path | None = None) -> RegionCatalog:
+    target_dir = config_dir or DEFAULT_CONFIG_DIR
+    return RegionCatalog.from_file(target_dir / "region_catalog.yaml")
+
+
+def load_industry_profiles(config_dir: Path | None = None) -> IndustryCatalog:
+    payload = load_yaml("industry_profiles.yaml", config_dir)
+    raw_profiles = payload.get("industry_groups") or payload.get("profiles") or []
+    if not isinstance(raw_profiles, list):
+        raise ValueError("industry_profiles.yaml 的 industry_groups 必须是列表")
+    profiles = []
+    for item in raw_profiles:
+        if not isinstance(item, Mapping) or not item.get("group_id"):
+            raise ValueError(f"行业关键词组必须包含 group_id: {item!r}")
+        profiles.append(
+            IndustryProfile(
+                group_id=str(item["group_id"]),
+                name=str(item.get("name") or item["group_id"]),
+                include=_as_tuple(item.get("include"), field_name="include"),
+                exclude=_as_tuple(item.get("exclude"), field_name="exclude"),
+                synonyms=_as_tuple(item.get("synonyms"), field_name="synonyms"),
+                aliases=_as_tuple(item.get("aliases"), field_name="aliases"),
+                priority=int(item.get("priority", 5)),
+            )
+        )
+    return IndustryCatalog(profiles)
+
+
+def load_search_profiles(config_dir: Path | None = None) -> SearchProfileRegistry:
+    payload = load_yaml("search_profiles.yaml", config_dir)
+    raw_profiles = payload.get("profiles") or []
+    if not isinstance(raw_profiles, list):
+        raise ValueError("search_profiles.yaml 的 profiles 必须是列表")
+    profiles = []
+    tuple_fields = {
+        "regions", "excluded_regions", "industry_groups", "include_keywords", "exclude_keywords",
+        "source_categories", "included_sources", "excluded_sources", "announcement_types",
+    }
+    for item in raw_profiles:
+        if not isinstance(item, Mapping) or not item.get("profile_id"):
+            raise ValueError(f"Search Profile 必须包含 profile_id: {item!r}")
+        normalized = dict(item)
+        for field_name in tuple_fields:
+            normalized[field_name] = _as_tuple(normalized.get(field_name), field_name=field_name)
+        if "max_queries_per_run" in normalized and "max_search_queries_per_run" not in normalized:
+            normalized["max_search_queries_per_run"] = normalized["max_queries_per_run"]
+        allowed = set(SearchProfile.__dataclass_fields__)
+        normalized = {key: value for key, value in normalized.items() if key in allowed}
+        profiles.append(SearchProfile(**normalized))
+    return SearchProfileRegistry(profiles)
+
+
+__all__ = [
+    "APP_ROOT",
+    "DEFAULT_CONFIG_DIR",
+    "IndustryCatalog",
+    "IndustryProfile",
+    "RegionCatalog",
+    "RegionEntry",
+    "RegionMatch",
+    "RegionRegistry",
+    "SearchProfile",
+    "SearchProfileRegistry",
+    "load_industry_profiles",
+    "load_keyword_catalog",
+    "load_region_catalog",
+    "load_search_profiles",
+    "load_yaml",
+]

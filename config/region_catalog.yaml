@@ -1,0 +1,55 @@
+version: 1
+config_version: 1
+description: 全国省级行政区划目录及西北默认搜索范围的城市层级
+regions:
+  - {region_code: CN-11, name: 北京市, short_name: 北京, aliases: [京], level: province}
+  - {region_code: CN-12, name: 天津市, short_name: 天津, aliases: [津], level: province}
+  - {region_code: CN-13, name: 河北省, short_name: 河北, aliases: [冀], level: province}
+  - {region_code: CN-14, name: 山西省, short_name: 山西, aliases: [晋], level: province}
+  - {region_code: CN-15, name: 内蒙古自治区, short_name: 内蒙古, aliases: [内蒙], level: province}
+  - {region_code: CN-21, name: 辽宁省, short_name: 辽宁, aliases: [辽], level: province}
+  - {region_code: CN-22, name: 吉林省, short_name: 吉林, aliases: [吉], level: province}
+  - {region_code: CN-23, name: 黑龙江省, short_name: 黑龙江, aliases: [黑], level: province}
+  - {region_code: CN-31, name: 上海市, short_name: 上海, aliases: [沪], level: province}
+  - {region_code: CN-32, name: 江苏省, short_name: 江苏, aliases: [苏], level: province}
+  - {region_code: CN-33, name: 浙江省, short_name: 浙江, aliases: [浙], level: province}
+  - {region_code: CN-34, name: 安徽省, short_name: 安徽, aliases: [皖], level: province}
+  - {region_code: CN-35, name: 福建省, short_name: 福建, aliases: [闽], level: province}
+  - {region_code: CN-36, name: 江西省, short_name: 江西, aliases: [赣], level: province}
+  - {region_code: CN-37, name: 山东省, short_name: 山东, aliases: [鲁], level: province}
+  - {region_code: CN-41, name: 河南省, short_name: 河南, aliases: [豫], level: province}
+  - {region_code: CN-42, name: 湖北省, short_name: 湖北, aliases: [鄂], level: province}
+  - {region_code: CN-43, name: 湖南省, short_name: 湖南, aliases: [湘], level: province}
+  - {region_code: CN-44, name: 广东省, short_name: 广东, aliases: [粤], level: province}
+  - {region_code: CN-45, name: 广西壮族自治区, short_name: 广西, aliases: [桂], level: province}
+  - {region_code: CN-46, name: 海南省, short_name: 海南, aliases: [琼], level: province}
+  - {region_code: CN-50, name: 重庆市, short_name: 重庆, aliases: [渝], level: province}
+  - {region_code: CN-51, name: 四川省, short_name: 四川, aliases: [川, 蜀], level: province}
+  - {region_code: CN-52, name: 贵州省, short_name: 贵州, aliases: [黔, 贵], level: province}
+  - {region_code: CN-53, name: 云南省, short_name: 云南, aliases: [滇], level: province}
+  - {region_code: CN-54, name: 西藏自治区, short_name: 西藏, aliases: [藏], level: province}
+  - {region_code: CN-61, name: 陕西省, short_name: 陕西, aliases: [陕], level: province}
+  - {region_code: CN-62, name: 甘肃省, short_name: 甘肃, aliases: [甘], level: province}
+  - {region_code: CN-63, name: 青海省, short_name: 青海, aliases: [青], level: province}
+  - {region_code: CN-64, name: 宁夏回族自治区, short_name: 宁夏, aliases: [宁], level: province}
+  - {region_code: CN-65, name: 新疆维吾尔自治区, short_name: 新疆, aliases: [新], level: province}
+  - {region_code: CN-71, name: 台湾省, short_name: 台湾, aliases: [台], level: province}
+  - {region_code: CN-81, name: 香港特别行政区, short_name: 香港, aliases: [港], level: province}
+  - {region_code: CN-82, name: 澳门特别行政区, short_name: 澳门, aliases: [澳], level: province}
+  - {region_code: CN-XJBT, name: 新疆生产建设兵团, short_name: 兵团, aliases: [新疆兵团, 兵团], level: special_region}
+
+  - {region_code: CN-6101, name: 西安市, short_name: 西安, aliases: [], level: city, parent_code: CN-61}
+  - {region_code: CN-6108, name: 榆林市, short_name: 榆林, aliases: [], level: city, parent_code: CN-61}
+  - {region_code: CN-6106, name: 延安市, short_name: 延安, aliases: [], level: city, parent_code: CN-61}
+  - {region_code: CN-6209, name: 酒泉市, short_name: 酒泉, aliases: [], level: city, parent_code: CN-62}
+  - {region_code: CN-6201, name: 兰州市, short_name: 兰州, aliases: [], level: city, parent_code: CN-62}
+  - {region_code: CN-6301, name: 西宁市, short_name: 西宁, aliases: [], level: city, parent_code: CN-63}
+  - {region_code: CN-6328, name: 海西蒙古族藏族自治州, short_name: 海西, aliases: [海西州], level: prefecture, parent_code: CN-63}
+  - {region_code: CN-6401, name: 银川市, short_name: 银川, aliases: [], level: city, parent_code: CN-64}
+  - {region_code: CN-6501, name: 乌鲁木齐市, short_name: 乌鲁木齐, aliases: [乌市], level: city, parent_code: CN-65}
+  - {region_code: CN-6505, name: 哈密市, short_name: 哈密, aliases: [], level: city, parent_code: CN-65}
+  - {region_code: CN-6504, name: 吐鲁番市, short_name: 吐鲁番, aliases: [], level: city, parent_code: CN-65}
+  - {region_code: CN-659001, name: 第一师阿拉尔市, short_name: 阿拉尔, aliases: [一师], level: city, parent_code: CN-XJBT}
+  - {region_code: CN-659002, name: 第二师铁门关市, short_name: 铁门关, aliases: [二师], level: city, parent_code: CN-XJBT}
+  - {region_code: CN-659003, name: 第三师图木舒克市, short_name: 图木舒克, aliases: [三师], level: city, parent_code: CN-XJBT}
+  - {region_code: CN-659004, name: 第四师可克达拉市, short_name: 可克达拉, aliases: [四师], level: city, parent_code: CN-XJBT}

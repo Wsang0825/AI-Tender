@@ -1,0 +1,18 @@
+version: 1
+providers:
+  - name: ddgs
+    priority: 1
+    enabled: true
+    daily_query_limit: 200
+    cooldown_seconds: 0
+  - name: searxng
+    priority: 2
+    enabled: false
+    base_url_env: SEARXNG_URL
+    daily_query_limit: 200
+    cooldown_seconds: 0
+  - name: custom
+    priority: 9
+    enabled: false
+    daily_query_limit: 0
+    cooldown_seconds: 0
