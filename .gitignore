@@ -7,6 +7,9 @@
 __pycache__/
 *.py[cod]
 *.pyd
+.venv/
+venv/
+env/
 .pytest_cache/
 .coverage
 htmlcov/
@@ -19,8 +22,14 @@ dist/
 # Local database and runtime state
 *.db
 *.db.lock
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
 data/
 downloads/
 output/
@@ -29,6 +38,8 @@ cache/
 temp/
 backups/
 models/
+.runtime/
+runtime/
 **/browser_profiles/
 
 # Editors and OS

@@ -1,143 +1,339 @@
-# AI-Tender：证据驱动的新能源招投标情报系统
+# AI-Tender
 
-AI-Tender 是一个本地优先、可审计、面向实战的新能源招投标搜索与研判系统。它把分散在公共资源交易平台、政府采购网站、能源央企采购平台、地方站点及公开行业线索中的项目信息，统一沉淀为可追溯的项目档案：从来源发现、公告抓取、文档解析，到证据留存、跨来源去重、状态计算和结果交付，形成一条完整的数据闭环。
+Evidence-driven tender intelligence for renewable-energy opportunities.
 
-它不是一个只返回几个搜索链接的关键词脚本，也不是把不确定信息包装成“准确答案”的黑盒模型。每个关键字段都尽量绑定原始 Evidence 和 Snapshot；规则无法确认时保留 `UNKNOWN`，并进入 Review 队列，方便人工复核。系统支持按地区、城市、行业、设备、时间窗口和项目阶段组合检索，适合持续追踪光伏、储能、风电及相关 EPC、采购和结构件机会。
+[![CI](https://github.com/Wsang0825/AI-Tender/actions/workflows/ci.yml/badge.svg)](https://github.com/Wsang0825/AI-Tender/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## 核心能力
+AI-Tender 是一个本地优先、证据驱动、可审计的新能源招投标搜索与研判系统。它把公开来源中的公告、附件和项目线索整理成可追溯的项目记录，覆盖来源发现、抓取、文档解析、证据留存、跨来源归并、状态计算、人工复核和结果导出。
 
-- **深度来源覆盖**：接入官方公共资源、政府采购、央国企采购、能源电力平台和公开 Discovery 线索，并保留来源等级与覆盖边界。
-- **证据优先**：保存公告原文、附件、解析结果、字段来源和时间线，支持回放与复核，拒绝无依据猜测。
-- **状态引擎**：确定性计算 `OPEN`、`UNKNOWN`、`CLOSED`，识别延期、变更、重开和状态冲突。
-- **跨来源归并**：基于项目名称、编号、招标人、代理机构等信息去重与身份解析，减少同一项目重复跟进。
-- **线索到官方追源**：公众号和二手平台只作为发现入口，系统会尝试按项目关键信息追查官方公告，并明确标记待核验结果。
-- **可交付结果**：输出 Markdown、JSON 和 Excel 结果，配套 Web 数据浏览器、搜索历史、Review 队列、来源健康度和手工修正能力。
-- **本地可控**：核心数据存储在 SQLite；Python 主路径不调用 OpenAI、Anthropic、Gemini 或其他模型 API，不依赖后台定时扫描。
+项目当前版本为 `0.2.0`。这是一个需要在本地部署的开源项目，不是托管式 SaaS，也不声称已经覆盖全部互联网来源或适用于所有生产环境。
 
-## 系统定位
+## What is AI-Tender / 项目简介
 
-Codex 负责理解自然语言需求、编排复杂核验和总结结果；Python 负责真实来源访问、确定性解析、Evidence/Snapshot、去重、状态机、数据库和导出。两者边界清晰：机器负责可重复执行，人工和 Codex 负责处理真正需要判断的疑难字段。
+新能源招投标信息分散在公共资源交易平台、政府采购网站、能源央国企采购平台、地方站点和公开行业线索中。AI-Tender 将这些来源接入统一的数据流，并保存每一步的来源和处理结果，使使用者可以回答的不只是“搜到了什么”，还包括：
 
-## 最简单的使用方式
+- 这条信息来自哪里，是否有原文或附件证据；
+- 多个页面是否指向同一个项目；
+- 项目当前是 `OPEN`、`UNKNOWN` 还是 `CLOSED`，判断依据是什么；
+- 哪些字段仍然需要人工或 Codex 复核；
+- 哪些来源没有访问成功，搜索覆盖边界在哪里。
 
-在 Codex 中直接说：
+## Why AI-Tender / 为什么需要它
 
-> 搜内蒙古最近 30 天光伏储能项目，只看现在还能参与的。
+普通关键词搜索通常只返回链接，无法稳定保存快照、处理附件、归并重复公告或解释状态变化。直接让 LLM 填满字段则会把“无法确认”伪装成确定事实。
 
-Codex 应调用：
+AI-Tender 将可重复的工作交给 Python，将需要理解和判断的工作显式交给 Codex 或人工：
 
-```powershell
-cd D:\AI-Tender\app
-D:\AI-Tender.venv\Scripts\python.exe -m tender_ai codex-search --region 内蒙古自治区 --days 30 --industry solar --industry storage --only-open
+- 规则和数据状态可重放、可测试；
+- 关键字段尽量绑定原始 Evidence；
+- 无法可靠确认的字段保留 `NULL` / `UNKNOWN`；
+- 延期、变更、重开和来源阻断不会被静默丢弃；
+- 搜索结果、候选池、Review 和来源覆盖情况可以继续被程序处理。
+
+## Key Features / 核心能力
+
+- **公开来源搜索**：支持已配置的公共资源、政府采购、能源电力和企业采购来源，并保留来源等级和健康状态。
+- **Candidate Recall**：先保存合理候选，再区分相关性、核验状态、招标状态、阻断原因和下一步动作。
+- **Evidence-first**：保存来源 URL、Snapshot、解析文档、原文片段、字段值和时间线，便于审计和回放。
+- **确定性状态引擎**：由 Python 计算 `OPEN`、`UNKNOWN`、`CLOSED`；Codex 不能直接把一个项目改成确定状态。
+- **身份解析与去重**：基于项目名称、项目编号、招标人、代理机构等事实进行跨来源归并；不确定匹配进入 Review。
+- **官方追源**：公众号和二手平台只作为线索，系统会尝试根据项目名称、编号、招标人和代理机构追查官方公告。
+- **文档处理**：支持 HTML、PDF、DOCX、XLSX 等已接入解析路径，并记录解析质量和失败原因。
+- **结果交付**：每次搜索生成 Markdown、JSON 和可选 Excel 结果，同时提供本地 Web 数据浏览器。
+- **本地可控**：核心数据使用 SQLite；Python 主路径不调用 OpenAI、Anthropic、Gemini 或其他模型 API，也不运行后台定时扫描。
+
+## Architecture / 架构
+
+```text
+Search request
+      │
+      ▼
+Source plan ──► Crawl / Discovery ──► Candidate pool
+                                      │
+                                      ▼
+                         Snapshot / Document parsing
+                                      │
+                                      ▼
+                         Deterministic extraction
+                                      │
+                                      ▼
+                           Evidence / Timeline
+                                      │
+                                      ▼
+                       Identity resolution / Deduplication
+                                      │
+                                      ▼
+                             Status Engine / Review
+                                      │
+                                      ▼
+                         Report / JSON / Excel / Web UI
 ```
 
-通常不需要用户手工记命令。给 Codex 的完整工作流见 [D:\AI-Tender\CODEX_SEARCH_GUIDE.md](D:\AI-Tender\CODEX_SEARCH_GUIDE.md)。
+### Python 的职责
 
-当前系统状态入口：[D:\AI-Tender\CURRENT_STATUS.md](D:\AI-Tender\CURRENT_STATUS.md)。
+Python 负责：
 
-## CLI
+- crawling、Discovery 和来源健康记录；
+- Snapshot、附件下载和解析产物留存；
+- HTML、PDF、DOCX、XLSX 等文档解析；
+- 确定性字段抽取、Evidence 和 Timeline；
+- Candidate Recall、身份解析和跨来源去重；
+- 状态引擎、SQLite 持久化、Review 文件和导出；
+- 本地 Web 数据浏览器。
 
-```powershell
-# 结构化按需搜索
-python -m tender_ai codex-search --region 新疆维吾尔自治区 --city 哈密市 --days 30 --equipment 光伏支架 --deep --only-open
+### Codex 的职责
 
-# 快捷中文搜索
-python -m tender_ai search "甘肃最近 7 天 EPC 项目，未知的也给我"
+Codex 是可选的上层协作智能层，负责：
 
-# 只看计划，不访问网站、不写正式搜索结果
-python -m tender_ai codex-search --region 云南省 --days 30 --industry solar --dry-run
+- 将自然语言需求映射为搜索参数；
+- 编排一次或多次 CLI 搜索和核验；
+- 阅读疑难公告、附件和 Snapshot；
+- 对歧义字段进行 Review；
+- 在有真实 Evidence 的前提下提出事实修正；
+- 汇总结果、覆盖范围、阻断来源和下一步动作；
+- 协助维护者理解代码和贡献变更。
 
-# 读取一次搜索结果
-python -m tender_ai inspect --project PROJECT_ID
-python -m tender_ai review --session SESSION_ID
-python -m tender_ai verify --project PROJECT_ID
-python -m tender_ai recalc
+Codex 不应该凭空写入事实，也不能绕过 Evidence 直接修改 `OPEN` / `CLOSED`。无法可靠确认的字段必须保持 `NULL` / `UNKNOWN`。
 
-# Excel 默认只导出 OPEN；加参数包含 UNKNOWN
-python -m tender_ai export --session SESSION_ID
-python -m tender_ai export --session SESSION_ID --include-unknown
+更细的边界和数据流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 
-# 历史条件、模板和扩展搜索
-python -m tender_ai sessions
-python -m tender_ai templates
-python -m tender_ai expand-search --session SESSION_ID --deep
+## Quick Start / 快速开始
 
-# 本地数据浏览器，不会自动搜索
-python -m tender_ai web --host 127.0.0.1 --port 8765
+### Requirements
+
+- Python `>=3.12,<3.13`；
+- Git；
+- 真实搜索需要可访问目标公开来源的网络环境；
+- 需要从仓库 checkout 运行，因为配置文件位于仓库的 `config/` 目录中。
+
+项目元数据目前只明确 Python 3.12。不同操作系统的浏览器、文件锁和来源访问行为可能不同，不要把未验证的平台当作已支持平台。
+
+### Install
+
+```bash
+git clone https://github.com/Wsang0825/AI-Tender.git
+cd AI-Tender
+
+python3.12 -m venv .venv
+# macOS / Linux
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -e "[test]"
 ```
 
-也可以双击 `D:\AI-Tender\start_web.bat` 启动 Web 数据浏览器。
-
-## Web 数据浏览器
-
-地址：`http://127.0.0.1:8765`
-
-Web 是数据浏览器和配置控制台，不是聊天机器人，包含：
-
-- 总览、OPEN、UNKNOWN、今天新增、今天变化、延期重开、关注、忽略
-- 搜索历史、Session 结果、Source Plan、Excel 导出
-- 项目详情、公告、Evidence、Timeline、Snapshot、PDF/文档/附件路径
-- Codex Review 待处理队列、Field Conflict、状态原因
-- Search Profile、地区、行业关键词、来源和 Search Provider 设置
-- Manual Override、取消人工修正、Favorite / Ignore
-- Source Health、Discovery 新来源和系统诊断
-
-修改设置后下一次显式搜索生效。没有 scheduler 开关，系统固定为按需执行。
-
-## 数据和输出路径
-
-- 应用：`D:\AI-Tender\app`
-- SQLite：`D:\AI-Tender\data\tender.db`
-- Snapshot：`D:\AI-Tender\data\snapshots`
-- 文档解析结果：`D:\AI-Tender\data\documents`
-- 附件：`D:\AI-Tender\downloads`
-- Search Session：`D:\AI-Tender\output\sessions\<session_id>`
-- 浏览器 Profile：`D:\AI-Tender\data\browser_profiles\<source_id>`
-- 全国地区目录：`config\region_catalog.yaml`
-- Search Profile：`config\search_profiles.yaml`
-- 行业关键词组：`config\industry_profiles.yaml`
-- Generic Adapter：`config\source_adapters\`
-- 当前状态与验证报告：`D:\AI-Tender\CURRENT_STATUS.md`、`D:\AI-Tender\ARCHITECTURE_REPORT.md`
-
-来源注册表还登记法定平台、地方官方来源家族和能源央企/电建电网采购平台，包括军队采购网、央采网、中直机关采购网、政采云、税务采购网、各级公共资源与政府采购站点、交通/水利招投标平台、国企阳光采购平台、发电集团采购平台、国网 ECP、南网、中石油、中石化和中海油等。全国海量省市区县子站点通过总站目录或 Discovery 发现，`registry_only` / `CATALOG` 只表示已登记，不表示已经逐站接入。
-
-深度搜索或显式 `--wechat` 会使用 `weixin_public_index` 查询公开索引中的微信公众号文章。任何登录、验证码、人机检测、JavaScript 验证或 HTTP 412 验证会立即通过 CLI stderr 提醒，并在结果文件标记人工动作和未覆盖来源。
-
-二手网站和公众号只作为线索：系统会用项目名称、项目/招标编号、招标人和代理机构执行有限官方追源；有官方命中时结果优先使用官方链接，未命中时保留二手出处并标注“官方公告未找到/待核验”。
-
-每次搜索输出 `summary.md`、`results.json`、`open_projects.json`、`unknown_projects.json`、`codex_review.md`、`codex_review.json`、`errors.json` 和 `sources.json`。
-
-每次搜索同时输出统一可读报告 `output\sessions\<session_id>\search_report.md`。对外回答搜索结果时，必须把官方来源、二手来源、来源等级、截止时间、状态、未覆盖来源和核验限制整理进这份文档，并向用户提供文档路径；JSON文件保留给Codex和程序继续处理。
-
-重复执行相同搜索时，系统会自动隐藏上次已经报告且没有内容、状态、公告或来源变化的项目，只输出新增、更新、延期重开和新发现来源；被隐藏项目仍保留在数据库和历史 Session 中，并在结果文件记录忽略数量。来源遇到登录、验证码或 JavaScript 验证（包括带验证页特征的 HTTP 412）时，会标记 `NEEDS_ATTENTION` 和 `manual_action_required`，明确提示人工处理，不伪装成无结果。
-
-## 架构边界
-
-- Codex：自然语言理解、复杂公告阅读、疑难字段判断、结果总结、按需核验编排。
-- Python：公开来源搜索、HTTP/API/HTML 抓取、Snapshot、确定性规则抽取、PDF/DOCX/XLSX 解析、Evidence、状态机、跨来源去重、SQLite、CLI。
-- Python 当前不调用 OpenAI、Anthropic、Gemini 或任何其他模型 API，不需要 API Key。
-- `OPEN`、`UNKNOWN`、`CLOSED` 由 Python Status Engine 计算；Codex 只能用带真实原文 Evidence 的 `set-field` 写回事实字段。
-- 规则无法可靠确认时保留 NULL/UNKNOWN，并生成 Codex Review，不猜值。
-- SQLite 使用 WAL、busy timeout、foreign keys 和 FTS5；FTS5 不可用时自动回退 LIKE。
-- 旧 LLM 接口仅为兼容预留，禁用且不在主执行路径；`llm_extracted` 不代表当前调用过模型。
-
-## 扩展方式
-
-- 换地区：修改 Search Profile 或在 CLI 传 `--region`，不改爬虫代码。
-- 换行业：新增 Industry Profile / Keyword Group。
-- 增加普通网站：新增 Generic Adapter YAML。
-- 增加特殊网站：新增 Custom Adapter。
-- 更换搜索服务：启用合法 Search Provider fallback。
-- 网站改版：使用已保存 Snapshot、`replay` 和 Source Contract Test 离线排查。
-- 状态规则变化：修改规则版本后执行 `python -m tender_ai recalc`。
-
-## 验证
+Windows PowerShell：
 
 ```powershell
-cd D:\AI-Tender\app
-python -m alembic upgrade head
-python -m pytest -q
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+```
+
+如果 PowerShell 禁止执行激活脚本，可以不激活虚拟环境，直接使用 `.venv/Scripts/python.exe` 运行下面的命令。
+
+### Initialize and verify
+
+建议显式指定一个本地运行数据库。`runtime/` 已加入 `.gitignore`，不会进入 Git：
+
+```bash
+python -m tender_ai init-db --database runtime/tender.db
+python -m tender_ai doctor --database runtime/tender.db
+python -m tender_ai --help
+```
+
+`init-db` 会创建 SQLite 表并同步来源注册表。`doctor` 会检查配置、数据库、解析器、Search Provider 和最近运行状态；它可能初始化或更新本地数据库，不是纯只读命令。
+
+对已有数据库执行 schema migration 前请先备份本地数据库，并通过 `TENDER_DATABASE_URL` 指定目标。新部署使用 `init-db` 即可；迁移既有库时使用 Alembic：
+
+```bash
+export TENDER_DATABASE_URL="sqlite:///$(pwd)/runtime/tender.db"
+alembic upgrade head
+```
+
+PowerShell：
+
+```powershell
+$databasePath = (Join-Path (Get-Location) "runtime\tender.db").Replace("\", "/")
+$env:TENDER_DATABASE_URL = "sqlite:///$databasePath"
+alembic upgrade head
+```
+
+不要删除或覆盖已有数据库来“解决”迁移问题。
+
+### Run the first search
+
+先运行 dry-run 查看计划，不访问来源网站：
+
+```bash
+python -m tender_ai codex-search \
+  --region "内蒙古自治区" \
+  --days 30 \
+  --industry solar \
+  --industry storage \
+  --only-open \
+  --database runtime/tender.db \
+  --dry-run
+```
+
+确认计划后，执行真实搜索：
+
+```bash
+python -m tender_ai codex-search \
+  --region "内蒙古自治区" \
+  --days 30 \
+  --industry solar \
+  --industry storage \
+  --only-open \
+  --database runtime/tender.db
+```
+
+也可以使用中文快捷查询：
+
+```bash
+python -m tender_ai search "甘肃最近 7 天 EPC 项目，未知的也给我" --database runtime/tender.db
+```
+
+真实搜索会访问配置中的公开来源，并在运行目录生成 Search Session、`search_report.md`、`summary.md`、`results.json`、`candidate_pool.json`、`layers.json`、Review、来源和错误信息。命令输出中的 `session_id` 可用于后续查看和导出。
+
+### Browse and export results
+
+查看搜索历史：
+
+```bash
+python -m tender_ai sessions --database runtime/tender.db
+```
+
+查看单个项目：
+
+```bash
+python -m tender_ai inspect --project PROJECT_ID --database runtime/tender.db
+```
+
+导出 Excel：
+
+```bash
+python -m tender_ai export \
+  --session SESSION_ID \
+  --database runtime/tender.db \
+  --output runtime/result.xlsx
+```
+
+启动本地 Web 数据浏览器：
+
+```bash
+python -m tender_ai web --database runtime/tender.db
+```
+
+然后打开 <http://127.0.0.1:8765>。Web 默认只监听本机；当前实现没有认证层，不要直接暴露到公网。
+
+### Runtime paths and configuration
+
+数据库参数优先级为：CLI `--database`，其次是 `TENDER_DATABASE_URL`，最后是 `TENDER_DB_PATH`。例如：
+
+```bash
+export TENDER_DB_PATH="$PWD/runtime/tender.db"
 python -m tender_ai doctor
 ```
 
-不要删除 `D:\AI-Tender\data\tender.db`，不要把 `.env`、Cookie、浏览器 Profile、缓存、日志、附件或数据库备份提交到 Git。
+PowerShell：
+
+```powershell
+$env:TENDER_DB_PATH = (Join-Path (Get-Location) "runtime\tender.db")
+python -m tender_ai doctor
+```
+
+`.env.example` 只列出代码实际读取的环境变量；项目当前不会自动加载 `.env`，请在 shell 中导出变量，或直接使用 CLI 参数。`SEARXNG_URL` 只有在 `config/search_providers.yaml` 启用 `searxng` 后才有意义。
+
+当前实现的默认运行目录由 checkout 目录的上一级推导，包含数据库、缓存、Snapshot、文档、下载附件、搜索输出和浏览器 Profile。为了避免不同安装位置的权限问题，部署时建议显式使用 `--database`，并确保 checkout 的父目录可写；这些运行产物不应提交到 Git。这是当前代码的已知限制，部署时应将运行目录视为本地状态而不是仓库内容。
+
+## Codex Workflow / 与 Codex 协作
+
+在 Codex 中可以直接提出：
+
+> 搜内蒙古最近 30 天光伏储能项目，只看现在还能参与的。
+
+上层工作流可以将其映射为：
+
+```bash
+python -m tender_ai codex-search \
+  --region "内蒙古自治区" \
+  --days 30 \
+  --industry solar \
+  --industry storage \
+  --only-open \
+  --database runtime/tender.db
+```
+
+随后 Codex 应优先读取本次 Session 的 `search_report.md`、`summary.md`、`results.json` 和 `codex_review.md`，检查来源覆盖和人工处理提醒；遇到 `UNKNOWN` 或字段冲突时阅读对应 Snapshot、解析文档和 Evidence，不能用猜测补齐字段。
+
+Codex 不是 Python 主路径的强制依赖。没有 Codex 时，使用者仍可直接运行 CLI、查看数据库和导出结果；Codex 主要提供自然语言编排、复杂文档理解和 Review 协作。
+
+详细的命令边界、dry-run、核验和 Evidence 写回流程见 [`docs/CODEX_SEARCH_GUIDE.md`](docs/CODEX_SEARCH_GUIDE.md)。
+
+## Evidence-first Design / 证据优先
+
+```text
+Source
+  → Snapshot
+  → Parsed Document
+  → Evidence
+  → Structured Fields
+  → Status Engine
+  → Review
+  → Report
+```
+
+`UNKNOWN` 不是系统错误，而是“当前证据不足以确认”的明确状态。来源被验证码、登录、HTTP 412/403/429、超时或适配器缺失阻断时，结果应保留阻断原因和未覆盖范围，不能伪装成零结果或成功访问。
+
+公众号和二手招标平台只提供线索。找到官方公告时以官方来源为准；没有找到时应标记为“二手线索，官方公告未找到/待核验”，而不是只输出二手链接。
+
+## Testing / 验证
+
+本地完整测试命令：
+
+```bash
+python -m pytest -q
+```
+
+CLI smoke checks：
+
+```bash
+python -m tender_ai --help
+python -m tender_ai doctor --database runtime/tender.db
+```
+
+`tests/test_recall_benchmark.py` 当前依赖作者本地保存的一份历史真实报告，干净 checkout 不具备该文件；基础 CI 因此明确排除该测试，而不是伪造报告或删除测试。详见 [`.github/workflows/ci.yml`](.github/workflows/ci.yml)。
+
+## Project Structure / 项目结构
+
+```text
+src/tender_ai/       Python package、CLI、Web、抓取、解析、Evidence 和状态逻辑
+tests/               单元测试、回归测试和离线架构测试
+config/              来源、行业、地区、Provider 和 Search Profile 配置
+migrations/          Alembic schema migrations
+docs/                面向使用者和贡献者的公开文档
+examples/            不含真实来源内容的合成示例
+```
+
+## Documentation / 文档
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：数据流、模块边界和 Evidence-first 架构。
+- [`docs/CODEX_SEARCH_GUIDE.md`](docs/CODEX_SEARCH_GUIDE.md)：自然语言到 CLI、只读/写入边界、Review 和 Evidence 规则。
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)：开发环境、测试、适配器和 Pull Request 规范。
+- [`SECURITY.md`](SECURITY.md)：不可信网页和文档输入、凭据及漏洞报告说明。
+- [`CHANGELOG.md`](CHANGELOG.md)：基于当前 Git history 的版本变化。
+- [`examples/README.md`](examples/README.md)：合成数据示例和端到端概念流程。
+
+## Contributing / 参与贡献
+
+欢迎提交适配器、解析器回归用例、配置改进、文档和测试。请先阅读 [`CONTRIBUTING.md`](CONTRIBUTING.md)，尤其是 Evidence、UNKNOWN、来源访问和敏感数据规则。
+
+## Security / 安全
+
+请不要提交 `.env`、Cookie、浏览器 Profile、访问令牌、API 凭据、数据库备份、下载附件或日志。安全问题请按 [`SECURITY.md`](SECURITY.md) 的私下报告方式处理。
+
+## License / 许可证
+
+AI-Tender 自身代码使用 [Apache License 2.0](LICENSE)。系统抓取或处理的第三方网页、公告、附件和数据仍受各自原始来源的版权、许可和使用条款约束，不会因为本项目采用 Apache-2.0 而改变第三方内容的版权归属或授权范围。

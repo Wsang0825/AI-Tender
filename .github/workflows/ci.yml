@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install package and test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Verify CLI entry point
+        run: python -m tender_ai --help
+
+      # This test currently reads a historical report that exists only in the
+      # maintainer's local runtime directory. Keep the test in the repository,
+      # but do not make basic CI depend on private/local runtime data.
+      - name: Run deterministic test suite
+        run: python -m pytest -q --ignore=tests/test_recall_benchmark.py

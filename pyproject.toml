@@ -5,9 +5,21 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-tender"
 version = "0.2.0"
-description = "Personal local regional renewable-energy tender discovery and extraction system"
+description = "Evidence-driven, auditable tender discovery and extraction for renewable-energy opportunities"
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Wsang0825" }]
 requires-python = ">=3.12,<3.13"
+keywords = ["tender", "procurement", "renewable-energy", "document-parsing", "web-scraping", "evidence", "codex"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet",
+    "Topic :: Office/Business",
+]
 dependencies = [
     "scrapling[fetchers]",
     "crawl4ai",
@@ -48,6 +60,11 @@ dependencies = [
 
 [project.scripts]
 tender-ai = "tender_ai.cli.main:app"
+
+[project.urls]
+Repository = "https://github.com/Wsang0825/AI-Tender"
+Issues = "https://github.com/Wsang0825/AI-Tender/issues"
+Documentation = "https://github.com/Wsang0825/AI-Tender#readme"
 
 [project.optional-dependencies]
 test = [
