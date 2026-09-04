@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import typer
-from sqlalchemy import inspect, select
+from sqlalchemy import inspect, select, text
 
 from tender_ai.config_loader import (
     APP_ROOT,
@@ -27,6 +27,7 @@ from tender_ai.config_loader import (
     load_search_profiles,
 )
 from tender_ai.crawlers.runner import CrawlRunner
+from tender_ai.candidates import candidate_dict
 from tender_ai.discovery.queries import generate_discovery_queries
 from tender_ai.discovery.runner import DiscoveryRunner
 from tender_ai.evidence.models import EvidenceRecord
@@ -35,26 +36,34 @@ from tender_ai.extractors.runner import ExtractionRunner
 from tender_ai.matching.dedupe import normalize_identity
 from tender_ai.models import TenderRecord
 from tender_ai.replay import ReplayRunner
+from tender_ai.recall_benchmark import DEFAULT_BENCHMARK_PATH, DEFAULT_REPORT_PATH, payload_json, run_recall_benchmark, write_recall_report
 from tender_ai.review import resolve_review_item, review_item_dict, write_review_files
-from tender_ai.search import SearchRequest, SearchRunner, parse_search_text
+from tender_ai.search import SearchRequest, SearchRunner, normalize_result_mode, normalize_search_mode, parse_search_text
 from tender_ai.sources.registry import SourceRegistry
-from tender_ai.status.engine import recalculate_status
+from tender_ai.status.engine import recalculate_status, with_manual_evidence
 from tender_ai.status.metadata import describe_time
 from tender_ai.status.time import as_shanghai, now_shanghai, parse_datetime
 from tender_ai.storage.database import create_engine_for, fts5_available, initialize_database, resolve_database_url, session_scope
 from tender_ai.storage.models import (
     Announcement,
     Attachment,
+    Candidate,
+    CandidateEnrichmentQuery,
+    CandidateEnrichmentResult,
+    CandidateFact,
+    CandidateSource,
     CodexReviewItem,
     CrawlRun,
     DocumentParse,
     Evidence,
     FieldConflict,
+    ManualOverride,
     Project,
     ProjectSource,
     SearchSession,
     Snapshot,
     Source,
+    SourcePivot,
     TimeFieldMetadata,
     TimelineEvent,
 )
@@ -67,7 +76,7 @@ from tender_ai.storage.repository import (
     save_manual_override,
 )
 from tender_ai.verification.runner import VerificationRunner
-from tender_ai.versioning import STATUS_RULE_VERSION
+from tender_ai.versioning import SCHEMA_VERSION, STATUS_RULE_VERSION
 from tender_ai.templates import (
     list_templates,
     request_from_template,
@@ -117,7 +126,10 @@ def _project_payload(project: Project) -> dict[str, Any]:
         "status_evaluated_at", "status_rule_version", "lifecycle_state", "last_change_at", "favorite", "ignored", "ignore_reason",
         "document_quality_score", "extraction_version", "extraction_method", "last_extracted_at", "verification_required",
         "verification_reason", "field_confidence", "source_confidence", "project_match_confidence", "overall_confidence",
-        "completeness_score", "needs_codex_review", "review_reason", "created_at", "updated_at",
+        "completeness_score", "needs_codex_review", "review_reason", "tender_status", "relevance_class",
+        "verification_status", "enrichment_state", "blocker", "next_action", "identity_status", "identity_confidence",
+        "relation_types_json", "matched_concepts_json", "missing_fields_json", "project_location", "tenderer_location",
+        "agency_location", "source_location", "rank_score", "created_at", "updated_at",
     )
     return {field_name: _json_default(getattr(project, field_name, None)) if getattr(project, field_name, None) is not None else None for field_name in fields}
 
@@ -180,7 +192,9 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
             "change_history", "crawl_runs", "crawl_errors", "discovered_sources", "search_queries", "snapshots",
             "time_field_metadata", "manual_overrides", "system_metadata", "document_parses", "timeline_events",
             "verification_tasks", "verification_results", "field_conflicts", "search_sessions", "search_session_projects",
-            "codex_review_items", "search_templates",
+            "codex_review_items", "search_templates", "candidates", "candidate_sources", "candidate_enrichment_queries",
+            "candidate_enrichment_results", "candidate_facts", "source_pivots",
+            "candidate_attachments",
         }
         missing = sorted(required_tables - table_names)
         checks.update({
@@ -191,6 +205,9 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
             "sqlite_fallback": not fts5_available(engine),
         })
         with session_scope(engine) as session:
+            migration_row = session.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).first() if "alembic_version" in table_names else None
+            checks["migration_current"] = migration_row[0] if migration_row else "UNSTAMPED_RUNTIME_SCHEMA"
+            checks["migration_expected"] = SCHEMA_VERSION
             checks["failed_sources"] = [row.source_id for row in session.scalars(select(Source).where(Source.runtime_status.in_(["DEGRADED", "NEEDS_ATTENTION"]))).all()]
             checks["suspect_zero_results_sources"] = [row.source_id for row in session.scalars(select(Source).where(Source.health_reason == "SUSPECT_ZERO_RESULTS")).all()]
             latest_run = session.scalar(select(CrawlRun).where(CrawlRun.finished_at.is_not(None)).order_by(CrawlRun.finished_at.desc()))
@@ -230,6 +247,21 @@ def doctor(database: str | None = typer.Option(None, "--database", help="SQLite 
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
     if errors:
         raise typer.Exit(code=1)
+
+
+@app.command("recall-regression")
+def recall_regression(
+    benchmark: str | None = typer.Option(None, "--benchmark", help="Recall 基准 YAML 路径"),
+    database: str | None = typer.Option(None, "--database"),
+    report: str | None = typer.Option(None, "--report", help="输出 Markdown 报告路径"),
+) -> None:
+    """在当前数据库和已保存真实报告/快照上运行 Recall 回归。"""
+
+    benchmark_path = Path(benchmark).expanduser() if benchmark else DEFAULT_BENCHMARK_PATH
+    payload = run_recall_benchmark(benchmark_path=benchmark_path, database=database)
+    report_path = write_recall_report(payload, Path(report).expanduser() if report else DEFAULT_REPORT_PATH)
+    payload = {**payload, "report_path": str(report_path)}
+    typer.echo(payload_json(payload))
 
 
 def _module_available(name: str) -> bool:
@@ -274,13 +306,17 @@ def recalc(
         for project in session.scalars(select(Project)).all():
             total += 1
             record = project_to_record(project)
-            decision = recalculate_status(record, reference)
+            evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
+            overrides = list(session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all())
+            gate_evidence = with_manual_evidence(evidence_rows, overrides, source_url=project.source_url)
+            decision = recalculate_status(record, reference, evidences=gate_evidence, require_evidence=True)
             if project.status != decision.status.value:
                 old_status = project.status
                 project.status = decision.status.value
                 add_status_history(session, project.project_id, old_status, project.status, decision.reason, reference)
                 changed += 1
             project.status_reason = decision.reason_code
+            project.tender_status = project.status
             project.status_evaluated_at = as_shanghai(reference)
             project.status_rule_version = STATUS_RULE_VERSION
             project.updated_at = as_shanghai(reference)
@@ -293,12 +329,13 @@ def extract(
     source: str | None = typer.Option(None, "--source", help="只处理一个 source_id 关联的公告"),
     sample_size: int = typer.Option(30, "--sample-size", min=1, max=200, help="真实公告抽查数量"),
     consolidate: bool = typer.Option(True, "--consolidate/--no-consolidate", help="是否执行确定编号的跨来源项目合并"),
+    reuse_cached: bool = typer.Option(True, "--reuse-cached/--no-reuse-cached", help="内容、解析器和规则版本未变化时复用已有抽取结果"),
     database: str | None = typer.Option(None, "--database", help="SQLite 文件路径或 SQLAlchemy URL"),
     dry_run: bool = typer.Option(False, "--dry-run", help="只解析并统计，不写项目、Evidence或文档记录"),
 ) -> None:
     """使用确定性规则解析已保存公告和附件，生成 Evidence 与 Codex Review。"""
 
-    summary = ExtractionRunner(database=database).run(announcement_id=announcement_id, source_id=source, sample_size=sample_size, dry_run=dry_run, consolidate=consolidate)
+    summary = ExtractionRunner(database=database).run(announcement_id=announcement_id, source_id=source, sample_size=sample_size, dry_run=dry_run, consolidate=consolidate, reuse_cached=reuse_cached)
     typer.echo(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, default=_json_default))
 
 
@@ -402,12 +439,20 @@ def _request_from_options(
     discovery_enabled: bool,
     wechat: bool,
     deep: bool,
+    search_mode: str | None = None,
+    result_mode: str | None = None,
+    concept_id: str | None = None,
+    relations: list[str] | None = None,
+    max_enrichments: int | None = None,
 ) -> SearchRequest:
     base = parse_search_text(query, profile_id=profile) if query else SearchRequest(profile_id=profile)
     profile_defaults = load_search_profiles().get(profile)
     return SearchRequest(
         raw_query=query,
         profile_id=profile,
+        search_mode=normalize_search_mode(search_mode or base.search_mode or profile_defaults.default_search_mode),
+        result_mode=normalize_result_mode(result_mode or base.result_mode or profile_defaults.default_result_mode),
+        concept_id=concept_id or base.concept_id,
         region=region or base.region,
         city=city or base.city,
         county=county or base.county,
@@ -431,6 +476,8 @@ def _request_from_options(
         discovery=discovery_enabled or base.discovery,
         wechat=wechat or base.wechat,
         deep=deep or base.deep,
+        relation_types=tuple(dict.fromkeys((relations or list(base.relation_types)))),
+        max_enrichments=max_enrichments,
     )
 
 
@@ -457,21 +504,37 @@ def _search_command(
     discovery_enabled: bool,
     wechat: bool,
     deep: bool,
+    search_mode: str | None,
+    result_mode: str | None,
+    concept_id: str | None,
+    relations: list[str],
+    max_enrichments: int | None,
     database: str | None,
     dry_run: bool,
     codex_output: bool = False,
 ) -> None:
-    request = _request_from_options(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep)
+    request = _request_from_options(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, search_mode=search_mode, result_mode=result_mode, concept_id=concept_id, relations=relations, max_enrichments=max_enrichments)
     summary = SearchRunner(database=database).run(request, dry_run=dry_run)
     payload = summary.as_dict()
     if codex_output:
-        payload["NEXT_ACTIONS_FOR_CODEX"] = [
-            "读取 summary.md 和 results.json",
+        next_actions = [
+            "读取 search_report.md、summary.md 和 results.json",
+            "先处理 manual_action_sources；需要登录或浏览器验证的来源必须立即告知用户",
             "优先检查 OPEN 项目及临近截止项目",
             "读取 codex_review.md 中的 PENDING 项目 Snapshot/PDF",
             "必要时执行 python -m tender_ai verify --project PROJECT_ID",
             "确认事实后使用 set-field 写回 Evidence，再执行 python -m tender_ai recalc",
         ]
+        if summary.suppressed_unchanged_count:
+            next_actions.append(f"本轮已自动隐藏 {summary.suppressed_unchanged_count} 个上次已报告且未变化项目，不要重复阅读或输出")
+        if summary.suppressed_valuable_lead_count:
+            next_actions.append(f"本轮已自动隐藏 {summary.suppressed_valuable_lead_count} 条上次已报告且原文未变化的价值线索，不要重复阅读或输出")
+        if summary.manual_action_sources:
+            next_actions.insert(0, "立即把人工处理来源的打开地址、HTTP 状态和操作说明反馈给用户；等待用户完成验证并回复‘已完成人工验证’后，只重试对应来源")
+        next_actions.append("二手网站或公众号线索只能作为线索；检查 official_trace，未命中官方来源时明确标注‘官方公告未找到/待核验’，不要只输出二手链接")
+        if summary.valuable_lead_count:
+            next_actions.append("读取 valuable_leads；把项目级EPC、前期跟踪、已建成历史安装、箱变/设备钢平台等线索单独上报，保留出处，不能混入直接组件支架采购或OPEN清单")
+        payload["NEXT_ACTIONS_FOR_CODEX"] = next_actions
     typer.echo(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default))
 
 
@@ -498,12 +561,17 @@ def search(
     discovery_enabled: bool = typer.Option(False, "--discovery"),
     wechat: bool = typer.Option(False, "--wechat"),
     deep: bool = typer.Option(False, "--deep"),
+    search_mode: str | None = typer.Option(None, "--search-mode", help="exact/broad/opportunity"),
+    result_mode: str | None = typer.Option(None, "--result-mode", help="full/delta（也接受 FULL_RESULT/DELTA_RESULT）"),
+    concept_id: str | None = typer.Option(None, "--concept"),
+    relations: list[str] = typer.Option([], "--relation"),
+    max_enrichments: int | None = typer.Option(None, "--max-enrichments", min=0, max=500),
     database: str | None = typer.Option(None, "--database"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """按需执行真实采集、规则抽取和状态筛选。"""
 
-    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run, codex_output=True)
+    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, search_mode=search_mode, result_mode=result_mode, concept_id=concept_id, relations=relations, max_enrichments=max_enrichments, database=database, dry_run=dry_run, codex_output=True)
 
 
 @app.command("codex-search")
@@ -529,12 +597,17 @@ def codex_search(
     discovery_enabled: bool = typer.Option(False, "--discovery"),
     wechat: bool = typer.Option(False, "--wechat"),
     deep: bool = typer.Option(False, "--deep"),
+    search_mode: str | None = typer.Option(None, "--search-mode", help="exact/broad/opportunity"),
+    result_mode: str | None = typer.Option(None, "--result-mode", help="full/delta（也接受 FULL_RESULT/DELTA_RESULT）"),
+    concept_id: str | None = typer.Option(None, "--concept"),
+    relations: list[str] = typer.Option([], "--relation"),
+    max_enrichments: int | None = typer.Option(None, "--max-enrichments", min=0, max=500),
     database: str | None = typer.Option(None, "--database"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Codex 首选的总控搜索命令，输出 sessions/results/review 文件。"""
 
-    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, database=database, dry_run=dry_run)
+    _search_command(query, profile=profile, region=region, city=city, county=county, days=days, date_from=date_from, date_to=date_to, industries=industries, project_types=project_types, equipment=equipment, keywords=keywords, exclude_keywords=exclude_keywords, source_level=source_level, source_categories=source_categories, announcement_types=announcement_types, include_unknown=include_unknown, only_open=only_open, discovery_enabled=discovery_enabled, wechat=wechat, deep=deep, search_mode=search_mode, result_mode=result_mode, concept_id=concept_id, relations=relations, max_enrichments=max_enrichments, database=database, dry_run=dry_run, codex_output=True)
 
 
 @app.command("review")
@@ -567,10 +640,14 @@ def _inspection(session: Any, *, project: Project | None = None, announcement: A
     announcements = list(session.scalars(select(Announcement).where(Announcement.project_id == project.project_id).order_by(Announcement.published_at.desc(), Announcement.id.desc())).all())
     selected_announcement = announcement or (announcements[0] if announcements else None)
     announcement_ids = [row.id for row in announcements]
-    evidence_query = select(Evidence).where(Evidence.project_id == project.project_id)
+    evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id).order_by(Evidence.id)).all())
     if announcement is not None:
-        evidence_query = evidence_query.where(Evidence.announcement_id == announcement.id)
-    evidence = [_evidence_payload(row) for row in session.scalars(evidence_query.order_by(Evidence.id)).all()]
+        evidence_rows = [
+            row for row in evidence_rows
+            if row.announcement_id == announcement.id
+            or (row.announcement_id is None and row.source_url and row.source_url == announcement.source_url)
+        ]
+    evidence = [_evidence_payload(row) for row in evidence_rows]
     timeline = []
     for row in session.scalars(select(TimelineEvent).where(TimelineEvent.project_id == project.project_id).order_by(TimelineEvent.event_at, TimelineEvent.id)).all():
         timeline.append({"event_id": row.id, "event_type": row.event_type, "event_time": _json_default(row.event_at), "announcement_id": row.announcement_id, "source_url": row.source_url, "title": row.title, "summary": row.summary, "deadline_snapshot": row.deadline_snapshot_json, "evidence_ids": json.loads(row.evidence_ids_json or "[]")})
@@ -587,6 +664,101 @@ def _inspection(session: Any, *, project: Project | None = None, announcement: A
         sources.append({"source_id": link.source_id, "source_name": source.source_name if source else None, "category": source.category if source else None, "source_level": project.source_level, "source_url": link.source_url, "canonical_url": link.canonical_url, "content_hash": link.content_hash})
     reviews = [review_item_dict(session, row) for row in session.scalars(select(CodexReviewItem).where(CodexReviewItem.project_id == project.project_id).order_by(CodexReviewItem.priority, CodexReviewItem.created_at)).all()]
     conflicts = [{"id": row.id, "field_name": row.field_name, "candidate_values": json.loads(row.candidate_values_json or "[]"), "evidence_ids": json.loads(row.evidence_ids_json or "[]"), "resolution_status": row.resolution_status, "detected_at": _json_default(row.detected_at)} for row in session.scalars(select(FieldConflict).where(FieldConflict.project_id == project.project_id).order_by(FieldConflict.id)).all()]
+    candidate = session.scalar(select(Candidate).where(Candidate.project_id == project.project_id).order_by(Candidate.updated_at.desc(), Candidate.created_at.desc()))
+    candidate_payload = candidate_dict(candidate) if candidate is not None else None
+    candidate_sources = []
+    enrichment_queries = []
+    enrichment_results = []
+    candidate_facts = []
+    source_pivots = []
+    if candidate is not None:
+        candidate_sources = [{
+            "id": row.id,
+            "source_id": row.source_id,
+            "source_url": row.source_url,
+            "original_url": row.original_url,
+            "canonical_url": row.canonical_url,
+            "source_domain": row.source_domain,
+            "source_name": row.source_name,
+            "source_level": row.source_level,
+            "source_type": row.source_type,
+            "provider": row.provider,
+            "source_title": row.source_title,
+            "snippet": row.snippet,
+            "source_location": row.source_location,
+            "published_at": _json_default(row.published_at) if row.published_at else None,
+            "content_hash": row.content_hash,
+            "is_official": row.is_official,
+            "is_secondary": row.is_secondary,
+            "access_status": row.access_status,
+            "first_seen_at": _json_default(row.first_seen_at),
+            "last_seen_at": _json_default(row.last_seen_at),
+        } for row in session.scalars(select(CandidateSource).where(CandidateSource.candidate_id == candidate.candidate_id).order_by(CandidateSource.id)).all()]
+        enrichment_queries = [{
+            "id": row.id,
+            "search_session_id": row.search_session_id,
+            "parent_query_id": row.parent_query_id,
+            "query_text": row.query_text,
+            "strategy": row.strategy,
+            "round_no": row.round_no,
+            "provider": row.provider,
+            "source_id": row.source_id,
+            "status": row.status,
+            "results_count": row.results_count,
+            "candidate_hits": row.candidate_hits,
+            "new_fact_count": row.new_fact_count,
+            "new_source_count": row.new_source_count,
+            "query_hash": row.query_hash,
+            "content_hash": row.content_hash,
+            "executed_at": _json_default(row.executed_at),
+            "error": row.error,
+        } for row in session.scalars(select(CandidateEnrichmentQuery).where(CandidateEnrichmentQuery.candidate_id == candidate.candidate_id).order_by(CandidateEnrichmentQuery.id)).all()]
+        enrichment_results = [{
+            "id": row.id,
+            "query_id": row.query_id,
+            "candidate_id": row.candidate_id,
+            "discovered_candidate_id": row.discovered_candidate_id,
+            "search_session_id": row.search_session_id,
+            "title": row.title,
+            "source_url": row.source_url,
+            "canonical_url": row.canonical_url,
+            "snippet": row.snippet,
+            "provider": row.provider,
+            "published_at": _json_default(row.published_at) if row.published_at else None,
+            "source_level": row.source_level,
+            "content_hash": row.content_hash,
+            "identity_status": row.identity_status,
+            "relevance_class": row.relevance_class,
+            "is_official": row.is_official,
+            "is_secondary": row.is_secondary,
+            "match_type": row.match_type,
+            "created_at": _json_default(row.created_at),
+        } for row in session.scalars(select(CandidateEnrichmentResult).where(CandidateEnrichmentResult.candidate_id == candidate.candidate_id).order_by(CandidateEnrichmentResult.id)).all()]
+        candidate_facts = [{
+            "id": row.id,
+            "field_name": row.field_name,
+            "value": row.value,
+            "normalized_value": row.normalized_value,
+            "raw_value": row.raw_value,
+            "evidence_id": row.evidence_id,
+            "source_url": row.source_url,
+            "source_level": row.source_level,
+            "confidence": row.confidence,
+            "is_current": row.is_current,
+            "created_at": _json_default(row.created_at),
+        } for row in session.scalars(select(CandidateFact).where(CandidateFact.candidate_id == candidate.candidate_id).order_by(CandidateFact.id)).all()]
+        source_pivots = [{
+            "id": row.id,
+            "entity_type": row.entity_type,
+            "entity_value": row.entity_value,
+            "source_id": row.source_id,
+            "discovered_url": row.discovered_url,
+            "domain": row.domain,
+            "strategy": row.strategy,
+            "confidence": row.confidence,
+            "status": row.status,
+            "created_at": _json_default(row.created_at),
+        } for row in session.scalars(select(SourcePivot).where(SourcePivot.candidate_id == candidate.candidate_id).order_by(SourcePivot.id)).all()]
     return {
         "project": _project_payload(project),
         "announcement": {"id": selected_announcement.id, "title": selected_announcement.title, "announcement_type": selected_announcement.announcement_type, "source_url": selected_announcement.source_url, "original_url": selected_announcement.original_url, "canonical_url": selected_announcement.canonical_url, "published_at": _json_default(selected_announcement.published_at) if selected_announcement.published_at else None, "content_hash": selected_announcement.content_hash, "snapshot_id": selected_announcement.snapshot_id, "clean_text": (selected_announcement.clean_text or "")[:2000]} if selected_announcement else None,
@@ -598,6 +770,12 @@ def _inspection(session: Any, *, project: Project | None = None, announcement: A
         "attachments": attachments,
         "codex_review": reviews,
         "field_conflicts": conflicts,
+        "candidate": candidate_payload,
+        "candidate_sources": candidate_sources,
+        "enrichment_queries": enrichment_queries,
+        "enrichment_results": enrichment_results,
+        "candidate_facts": candidate_facts,
+        "source_pivots": source_pivots,
         "local_paths": list(dict.fromkeys([item["file_path"] for item in documents if item.get("file_path")] + [item["clean_text_path"] for item in documents if item.get("clean_text_path")] + [item["markdown_path"] for item in documents if item.get("markdown_path")] + [item["local_path"] for item in attachments if item.get("local_path")])),
         "announcement_count": len(announcement_ids),
     }
@@ -637,6 +815,7 @@ def inspect_command(
         f"来源等级：{p.get('source_level') or '未知'}；需要Review：{'是' if p.get('needs_codex_review') else '否'}",
         "",
         f"公告数：{len(payload['announcements'])}；Evidence：{len(payload['evidence'])}；Timeline：{len(payload['timeline'])}",
+        f"候选状态：{(payload.get('candidate') or {}).get('enrichment_state', '无候选记录')}；候选来源：{len(payload.get('candidate_sources', []))}；递归查询：{len(payload.get('enrichment_queries', []))}",
         "",
         "## Timeline",
         "",
@@ -716,7 +895,10 @@ def set_field(
             conflict.resolution = f"CODEX_REVIEW Evidence {evidence_row.id}"
             conflict.resolved_at = now_shanghai()
         old_status = target_project.status
-        decision = recalculate_status(project_to_record(target_project))
+        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == target_project.project_id)).all())
+        overrides = list(session.scalars(select(ManualOverride).where(ManualOverride.project_id == target_project.project_id, ManualOverride.active.is_(True))).all())
+        gate_evidence = with_manual_evidence(evidence_rows, overrides, source_url=target_project.source_url)
+        decision = recalculate_status(project_to_record(target_project), evidences=gate_evidence, require_evidence=True)
         target_project.status = decision.status.value
         target_project.status_reason = decision.reason_code
         target_project.status_evaluated_at = now_shanghai()
@@ -767,7 +949,7 @@ def sources(as_json: bool = typer.Option(False, "--json", help="使用 JSON 输�
         return
     for item in registry.definitions:
         state = "enabled" if item.enabled and item.crawl_enabled else "disabled"
-        typer.echo(f"{item.source_id:28} {item.source_name:24} {item.category:10} {state:8} {item.status}")
+        typer.echo(f"{item.source_id:36} {item.source_name:32} {item.category:16} {state:8} {item.status}")
 
 
 @app.command("sessions")

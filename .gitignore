@@ -18,6 +18,7 @@ dist/
 
 # Local database and runtime state
 *.db
+*.db.lock
 *.sqlite
 *.sqlite3
 data/

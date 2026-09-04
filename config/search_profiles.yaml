@@ -21,6 +21,13 @@ profiles:
     max_queries_per_run: 48
     max_queries_per_day: 200
     max_results_per_query: 8
+    default_search_mode: opportunity
+    default_result_mode: AUTO
+    coverage_budget: 48
+    discovery_budget: 12
+    enrichment_budget: 24
+    verification_budget: 12
+    max_verifications_per_session: 12
     only_active_opportunities: false
     min_source_level: E
     schedule_enabled: false

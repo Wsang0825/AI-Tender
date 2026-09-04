@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,28 @@ class SourceDefinition(BaseModel):
     lookback_days: int = Field(default=30, ge=1, le=3650)
     browser_profile_path: str | None = None
     notes: str | None = None
+
+
+def configured_manual_action(definition: SourceDefinition) -> str | None:
+    """返回配置已经确认的人工动作，不把普通 registry_only 当成需登录来源。"""
+
+    if definition.requires_login:
+        return "LOGIN_REQUIRED"
+    if definition.status != "NEEDS_ATTENTION":
+        return None
+    note = (definition.notes or "").casefold()
+    if "captcha" in note or "验证码" in note or "人机" in note:
+        return "CAPTCHA"
+    if "login" in note or "登录" in note:
+        return "LOGIN_REQUIRED"
+    return "VERIFICATION_REQUIRED"
+
+
+def configured_manual_http_status(definition: SourceDefinition) -> int | None:
+    """从已核验的来源备注提取阻断状态，避免人工项显示成未知。"""
+
+    match = re.search(r"\bHTTP\s+(\d{3})\b", definition.notes or "", re.I)
+    return int(match.group(1)) if match else None
 
 
 class ConfiguredSourceAdapter(SourceAdapter):

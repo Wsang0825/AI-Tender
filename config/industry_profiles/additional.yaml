@@ -1,0 +1,16 @@
+version: 1
+industry_groups:
+  - group_id: microgrid
+    name: 微电网
+    include: [微电网, 微网, 源网荷储]
+    exclude: []
+    synonyms: [综合能源微网]
+    aliases: []
+    priority: 4
+  - group_id: data_center_power
+    name: 数据中心电力
+    include: [数据中心供电, 数据中心电源, 机房供配电]
+    exclude: []
+    synonyms: [数据中心能源]
+    aliases: []
+    priority: 5

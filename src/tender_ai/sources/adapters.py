@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from html import unescape
 from pathlib import Path
 from typing import Any, Iterable
-from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -23,7 +23,7 @@ from tender_ai.extractors.tender import ExtractionResult, normalize_detail
 from tender_ai.sources.base import AdapterHealth, SourceAdapter
 from tender_ai.sources.contracts import AttachmentLink, DetailPayload, RawListingItem
 from tender_ai.sources.registry import SourceDefinition
-from tender_ai.status.time import parse_datetime
+from tender_ai.status.time import now_shanghai, parse_datetime
 
 
 _DATE_RE = re.compile(r"20\d{2}\s*[年./-]\s*\d{1,2}\s*[月./-]\s*\d{1,2}")
@@ -639,6 +639,421 @@ class CEBPubServiceAdapter(HttpSourceAdapter):
         return AdapterHealth(self.source_id, "ACTIVE", "公开检索页可访问；详情使用页面短 ID 保留")
 
 
+class PowerChinaAdapter(HttpSourceAdapter):
+    """中国电建阳光采购网公开公告 API。
+
+    该站首页是 Vue 应用，但公告列表和详情实际由公开 JSON 接口提供。
+    这里直接使用已核验的接口，不启动浏览器，也不猜测前端渲染后的详情地址。
+    """
+
+    api_base = "https://bid.powerchina.cn/newcbs/recpro-newmember"
+    list_endpoint = f"{api_base}/BidAnnouncementSummary/list"
+    detail_endpoint = f"{api_base}/BidAnnouncementSummary/getInfo"
+    pdf_endpoint = f"{api_base}/BidAnnouncementSummary/downloadPdf"
+    listing_path = "/consult/notice"
+    page_size = 20
+
+    @staticmethod
+    def _detail_url(item_id: str) -> str:
+        return f"https://bid.powerchina.cn/notice/detail?id={quote(item_id, safe='')}"
+
+    @staticmethod
+    def _metadata(row: dict[str, Any]) -> dict[str, Any]:
+        """把 API 字段映射到统一 Extractor 能识别的字段名。"""
+
+        metadata = dict(row)
+        metadata.update(
+            {
+                "projectname": row.get("projectName") or row.get("projectname"),
+                "projectnum": row.get("projectNumber") or row.get("projectNum"),
+                "tendercode": row.get("tenderCode") or row.get("tenderNumber"),
+                "owner": row.get("procuringEntity") or row.get("tenderer"),
+                "purchaser": row.get("procuringEntity") or row.get("purchaser"),
+                "published_at": row.get("publishTime") or row.get("createTime"),
+                "registration_deadline": row.get("registrationDeadline"),
+                "bid_deadline": row.get("submissionDeadline"),
+                "open_time": row.get("bidOpenTime"),
+                "powerchina_id": row.get("id"),
+            }
+        )
+        return metadata
+
+    def _build_payload(self, query: str, page: int, since_days: int) -> dict[str, Any]:
+        cutoff = now_shanghai() - timedelta(days=max(1, since_days))
+        return {
+            "pageNum": page,
+            "pageSize": self.page_size,
+            "announcementType": "招采公告",
+            "companyType": "3",
+            "keyWords": query,
+            "publishTime": cutoff.strftime("%Y-%m-%d"),
+            "publishTimeType": "1",
+            "time": int(now_shanghai().timestamp() * 1000),
+        }
+
+    def fetch_list(self, listing_url: str, **kwargs: Any) -> list[RawListingItem]:
+        query = str(kwargs.get("query") or "")
+        page = max(1, int(kwargs.get("page", 1)))
+        since_days = max(1, int(kwargs.get("since_days", self.definition.lookback_days)))
+        response = self.http.post_json(
+            self.list_endpoint,
+            self._build_payload(query, page, since_days),
+            headers={"Referer": "https://bid.powerchina.cn/", "X-Requested-With": "XMLHttpRequest"},
+            cache_namespace=f"source:{self.source_id}:api:list",
+            cache_expire=300.0,
+        )
+        rows = _json_records(response.json())
+        items: list[RawListingItem] = []
+        for row in rows:
+            item_id = str(row.get("id") or row.get("systemId") or "").strip()
+            title = _clean(row.get("title") or row.get("projectName"))
+            if not item_id or not title:
+                continue
+            published = _parse_date(row.get("publishTime") or row.get("createTime"))
+            metadata = self._metadata(row)
+            metadata["content"] = title
+            items.append(
+                RawListingItem(
+                    title=title,
+                    url=self._detail_url(item_id),
+                    published_at=published,
+                    metadata=metadata,
+                )
+            )
+        return items
+
+    def search(self, query: str, **kwargs: Any) -> list[RawListingItem]:
+        max_pages = max(1, int(kwargs.get("max_pages", self.definition.max_pages)))
+        since_days = max(1, int(kwargs.get("since_days", self.definition.lookback_days)))
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        listing_url = _absolute(self.definition.base_url, self.listing_path)
+        for page in range(1, max_pages + 1):
+            items = self.fetch_list(listing_url, query=query, page=page, since_days=since_days)
+            for item in items:
+                if item.url not in seen and _matches(item, query):
+                    seen.add(item.url)
+                    result.append(item)
+        return result
+
+    def fetch_detail(self, detail_url: str, **kwargs: Any) -> DetailPayload | None:
+        parsed = parse_qs(urlparse(detail_url).query)
+        item_id = (parsed.get("id") or [""])[0].strip()
+        if not item_id:
+            return super().fetch_detail(detail_url, **kwargs)
+        response = self.http.get(
+            f"{self.detail_endpoint}/{quote(item_id, safe='')}",
+            headers={"Referer": "https://bid.powerchina.cn/"},
+            cache_namespace=f"source:{self.source_id}:api:detail",
+            cache_expire=900.0,
+        )
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise HttpFetchError(
+                "中国电建详情 API 未返回公告数据",
+                url=response.url,
+                status_code=response.status_code,
+                health_reason="PARSER_ERROR",
+            )
+        html = str(data.get("announcementContent") or "")
+        visible = _visible_text(html) if html else ""
+        metadata = self._metadata(data)
+        metadata["content"] = visible
+        prefix_parts = [
+            f"发布日期：{metadata.get('published_at') or ''}",
+            f"报名截止时间：{metadata.get('registration_deadline') or ''}",
+            f"投标截止时间：{metadata.get('bid_deadline') or ''}",
+            f"开标时间：{metadata.get('open_time') or ''}",
+        ]
+        text = " ".join(part for part in prefix_parts if not part.endswith("："))
+        text = f"{text} {visible}".strip()
+        attachments = _extract_attachments(html, detail_url)
+        if data.get("pdfId") or data.get("id"):
+            pdf_url = f"{self.pdf_endpoint}?id={quote(str(data.get('id') or item_id), safe='')}"
+            if not any(link.url == pdf_url for link in attachments):
+                attachments.append(AttachmentLink(url=pdf_url, file_name=f"powerchina_{item_id}.pdf", mime_type="application/pdf"))
+        return DetailPayload(
+            title=_clean(data.get("title") or data.get("projectName") or item_id),
+            url=detail_url,
+            html=html,
+            text=text,
+            metadata=metadata,
+            attachments=attachments,
+        )
+
+
+class ChnEnergyEZhaoAdapter(HttpSourceAdapter):
+    """国能 e 招公开公告适配器。
+
+    国能 e 招的公开公告列表是静态 HTML 分页，详情页和附件链接也在同一公开
+    域名下。这里按实际页面路径抓取，不把登录后的投标操作误认为公开数据。
+    """
+
+    category_paths = (
+        # 资格预审、招标公告、非招标公告和变更公告。
+        "/bidweb/001/001001/001001001/moreinfo.html",
+        "/bidweb/001/001001/001001002/moreinfo.html",
+        "/bidweb/001/001001/001001003/moreinfo.html",
+        "/bidweb/001/001002/001002001/moreinfo.html",
+        "/bidweb/001/001002/001002002/moreinfo.html",
+        "/bidweb/001/001002/001002003/moreinfo.html",
+        "/bidweb/001/001003/001003001/moreinfo.html",
+        "/bidweb/001/001003/001003002/moreinfo.html",
+        "/bidweb/001/001003/001003003/moreinfo.html",
+        "/bidweb/001/001004/001004001/moreinfo.html",
+        "/bidweb/001/001004/001004002/moreinfo.html",
+        "/bidweb/001/001004/001004003/moreinfo.html",
+    )
+
+    @staticmethod
+    def _page_url(path: str, page: int) -> str:
+        if page <= 1:
+            return path
+        parsed = urlparse(path)
+        parent = parsed.path.rsplit("/", 1)[0].rstrip("/")
+        suffix = f"/{page}.html"
+        return f"{parent}{suffix}" + (f"?{parsed.query}" if parsed.query else "")
+
+    @staticmethod
+    def _list_item(anchor: Any, listing_url: str) -> RawListingItem | None:
+        title = _clean(anchor.get("title") or anchor.get_text(" ", strip=True))
+        url = _absolute(listing_url, anchor.get("href"))
+        if not title or not url or not re.search(r"/bidweb/", url, re.I):
+            return None
+        container = anchor.find_parent("li") or anchor.parent
+        context = _clean(container.get_text(" ", strip=True) if container else title)
+        author = container.select_one(".author") if container else None
+        code = _clean(author.get_text(" ", strip=True)) if author else ""
+        metadata: dict[str, Any] = {"content": context, "tendercode": code or None, "category_url": listing_url}
+        return RawListingItem(
+            title=title,
+            url=url,
+            published_at=_date_from_text(context),
+            metadata=metadata,
+        )
+
+    def fetch_list(self, listing_url: str, **kwargs: Any) -> list[RawListingItem]:
+        response = self._get(
+            listing_url,
+            namespace=f"source:{self.source_id}:list",
+            expire=300.0,
+            headers={"Referer": self.definition.base_url},
+        )
+        soup = BeautifulSoup(response.text, "lxml")
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        anchors = soup.select(".right-items a.infolink, .right-item a.infolink, a.infolink")
+        for anchor in anchors:
+            item = self._list_item(anchor, listing_url)
+            if item is not None and item.url not in seen:
+                seen.add(item.url)
+                result.append(item)
+        return result
+
+    def search(self, query: str, **kwargs: Any) -> list[RawListingItem]:
+        max_pages = max(1, int(kwargs.get("max_pages", self.definition.max_pages)))
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        for category_path in self.category_paths:
+            for page in range(1, max_pages + 1):
+                listing_url = self._page_url(category_path, page)
+                try:
+                    items = self.fetch_list(listing_url)
+                except HttpFetchError:
+                    # 一个公告栏目失败不能吞掉其他栏目；上层会保留具体错误。
+                    break
+                for item in items:
+                    if item.url not in seen and _matches(item, query):
+                        seen.add(item.url)
+                        result.append(item)
+        return result
+
+
+class DatangAdapter(HttpSourceAdapter):
+    """大唐公开公告接口适配器（cweme.cn）。"""
+
+    api_base = "https://www.cweme.cn/cweme-index/indexController"
+    list_endpoint = f"{api_base}/getList"
+    detail_endpoint = f"{api_base}/fzggDetail"
+    detail_page = "https://www.cweme.cn/cweme-index/webpage/jsp/zbggDetail.jsp"
+    page_size = 10
+
+    @staticmethod
+    def _detail_url(item_id: str) -> str:
+        return f"https://www.cweme.cn/cweme-index/webpage/jsp/zbggDetail.jsp?id={quote(item_id, safe='')}"
+
+    @staticmethod
+    def _metadata(row: dict[str, Any]) -> dict[str, Any]:
+        metadata = dict(row)
+        metadata.update(
+            {
+                "projectname": row.get("projectname") or row.get("project_name") or row.get("message_title"),
+                "projectnum": row.get("projectnum") or row.get("project_no") or row.get("message_no"),
+                "tendercode": row.get("tendercode") or row.get("tender_no") or row.get("message_no"),
+                "owner": row.get("bid_tenderer") or row.get("tenderer") or row.get("owner"),
+                "purchaser": row.get("bid_tenderer") or row.get("purchaser"),
+                "tenderer": row.get("bid_tenderer") or row.get("tenderer"),
+                "published_at": row.get("publish_time") or row.get("published_at"),
+                "bid_deadline": row.get("deadline") or row.get("bid_deadline"),
+                "open_time": row.get("open_time"),
+            }
+        )
+        return metadata
+
+    def _post_form(self, endpoint: str, payload: dict[str, Any], *, namespace: str, expire: float) -> HttpResponse:
+        return self.http.request(
+            "POST",
+            endpoint,
+            data=payload,
+            headers={
+                "Referer": "https://www.cweme.cn/cweme-index/webpage/jsp/zbggList.jsp",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+            cache_namespace=namespace,
+            cache_expire=expire,
+        )
+
+    def fetch_list(self, listing_url: str, **kwargs: Any) -> list[RawListingItem]:
+        query = str(kwargs.get("query") or "")
+        page = max(1, int(kwargs.get("page", 1)))
+        since_days = max(1, int(kwargs.get("since_days", self.definition.lookback_days)))
+        cutoff = now_shanghai() - timedelta(days=since_days)
+        message_type = str(kwargs.get("message_type") or "0")
+        payload = {
+            "limit": str(self.page_size),
+            "page": str(page),
+            "messagetype": message_type,
+            "message_title": query,
+            "bid_tenderer": "",
+            "message_no": "",
+            "pro_bidding_mothod": "",
+            "startDate": cutoff.strftime("%Y-%m-%d"),
+            "endDate": now_shanghai().strftime("%Y-%m-%d"),
+        }
+        response = self._post_form(self.list_endpoint, payload, namespace=f"source:{self.source_id}:api:list", expire=300.0)
+        rows = _json_records(response.json())
+        result: list[RawListingItem] = []
+        for row in rows:
+            item_id = str(row.get("id") or row.get("gg_id") or "").strip()
+            title = _clean(row.get("message_title") or row.get("title"))
+            if not item_id or not title:
+                continue
+            published = _parse_date(row.get("publish_time") or row.get("published_at"))
+            metadata = self._metadata(row)
+            metadata["content"] = _clean(" ".join(str(row.get(key) or "") for key in ("message_title", "message_no", "bid_tenderer", "pro_bidding_mothod", "deadline")))
+            result.append(RawListingItem(title=title, url=self._detail_url(item_id), published_at=published, metadata=metadata))
+        return result
+
+    def search(self, query: str, **kwargs: Any) -> list[RawListingItem]:
+        max_pages = max(1, int(kwargs.get("max_pages", self.definition.max_pages)))
+        since_days = max(1, int(kwargs.get("since_days", self.definition.lookback_days)))
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        # 0=招标公告，1=变更/补充类公告；变更不能被普通搜索遗漏。
+        for message_type in ("0", "1"):
+            for page in range(1, max_pages + 1):
+                items = self.fetch_list(
+                    self.detail_page,
+                    query=query,
+                    page=page,
+                    since_days=since_days,
+                    message_type=message_type,
+                )
+                for item in items:
+                    if item.url not in seen and _matches(item, query):
+                        seen.add(item.url)
+                        result.append(item)
+        return result
+
+    def fetch_detail(self, detail_url: str, **kwargs: Any) -> DetailPayload | None:
+        item_id = (parse_qs(urlparse(detail_url).query).get("id") or [""])[0].strip()
+        if not item_id:
+            return super().fetch_detail(detail_url, **kwargs)
+        response = self._post_form(self.detail_endpoint, {"id": item_id}, namespace=f"source:{self.source_id}:api:detail", expire=900.0)
+        payload = response.json()
+        # 当前接口直接返回公告对象；部分部署版本会再包一层 data。
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict) and isinstance(payload, dict) and (payload.get("id") or payload.get("message_title")):
+            data = payload
+        if not isinstance(data, dict):
+            raise HttpFetchError(
+                "大唐详情接口未返回公告数据",
+                url=response.url,
+                status_code=response.status_code,
+                health_reason="PARSER_ERROR",
+            )
+        metadata = self._metadata(data)
+        content_candidates = (
+            data.get("message_content"), data.get("content"), data.get("pro_overvier"),
+            data.get("project_overview"), data.get("pro_quali_examin"), data.get("qualification"),
+        )
+        content = next((_clean(value) for value in content_candidates if _clean(value)), "")
+        html_content = str(next((value for value in content_candidates if isinstance(value, str) and "<" in value and ">" in value), "") or "")
+        visible = _visible_text(html_content) if html_content else content
+        prefix = " ".join(
+            f"{label}：{_clean(data.get(key))}"
+            for label, key in (("发布日期", "publish_time"), ("投标截止时间", "deadline"), ("项目编号", "message_no"), ("招标人", "bid_tenderer"))
+            if _clean(data.get(key))
+        )
+        text = f"{prefix} {visible}".strip()
+        attachments = _extract_attachments(html_content, detail_url) if html_content else []
+        pdf_url = _absolute(detail_url, str(data.get("pdf_url") or ""))
+        if pdf_url and not any(link.url == pdf_url for link in attachments):
+            parsed = urlparse(pdf_url)
+            name = unquote(Path(parsed.path).name) or f"datang_{item_id}.pdf"
+            attachments.append(AttachmentLink(url=pdf_url, file_name=name, mime_type="application/pdf"))
+        metadata["content"] = text
+        return DetailPayload(
+            title=_clean(data.get("message_title") or data.get("title") or item_id),
+            url=detail_url,
+            html=html_content,
+            text=text,
+            metadata=metadata,
+            attachments=attachments,
+        )
+
+
+class ShanxiChangzhiGGZYAdapter(HttpSourceAdapter):
+    """山西长治市公共资源交易中心公开 HTML 适配器。"""
+
+    listing_paths = (
+        "/front/notice/list?type=ZBGG&xmlx=JSGC",
+        "/front/notice/list?type=ZBGG&xmlx=ZFCG",
+    )
+
+    def fetch_list(self, listing_url: str, **kwargs: Any) -> list[RawListingItem]:
+        response = self._get(listing_url, namespace=f"source:{self.source_id}:list", expire=300.0)
+        soup = BeautifulSoup(response.text, "lxml")
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        for anchor in soup.select("a[href*='/front/notice/detail']"):
+            title = _clean(anchor.get("title") or anchor.get_text(" ", strip=True))
+            url = _absolute(listing_url, anchor.get("href"))
+            if not title or not url or url in seen:
+                continue
+            container = anchor.find_parent("li") or anchor.parent
+            context = _clean(container.get_text(" ", strip=True) if container else title)
+            seen.add(url)
+            result.append(RawListingItem(title=title, url=url, published_at=_date_from_text(context), metadata={"content": context}))
+        return result
+
+    def search(self, query: str, **kwargs: Any) -> list[RawListingItem]:
+        max_pages = max(1, int(kwargs.get("max_pages", self.definition.max_pages)))
+        result: list[RawListingItem] = []
+        seen: set[str] = set()
+        for path in self.listing_paths:
+            for page in range(1, max_pages + 1):
+                # 当前公开页面的第一页已核验；不猜测分页参数，避免把错误 URL 当作覆盖。
+                if page > 1:
+                    break
+                for item in self.fetch_list(_absolute(self.definition.base_url, path)):
+                    if item.url not in seen and _matches(item, query):
+                        seen.add(item.url)
+                        result.append(item)
+        return result
+
+
 class ShaanxiGovernmentPurchaseAdapter(HttpSourceAdapter):
     listing_url = "https://www.ccgp-shaanxi.gov.cn/cms-sx/site/shanxi/xxgg/index.html?result=result"
     endpoint = "https://www.ccgp-shaanxi.gov.cn/freecms/rest/v1/notice/selectInfoMoreChannel.do"
@@ -692,6 +1107,10 @@ def build_adapter(definition: SourceDefinition) -> SourceAdapter:
         "ccgp_ningxia": NingxiaGovernmentPurchaseAdapter,
         "xinjiang_ggzy": XinjiangGGZYAdapter,
         "bingtuan_ggzy": BingtuanGGZYAdapter,
+        "powerchina": PowerChinaAdapter,
+        "chnenergy_e_zhao": ChnEnergyEZhaoAdapter,
+        "datang": DatangAdapter,
+        "shanxi_changzhi_ggzy": ShanxiChangzhiGGZYAdapter,
     }
     adapter_type = mapping.get(definition.adapter, ConfiguredSourceAdapter)
     return adapter_type(definition)  # type: ignore[call-arg]
@@ -729,9 +1148,9 @@ class CustomBrowserAdapter(ConfiguredSourceAdapter):
 
 
 __all__ = [
-    "BingtuanGGZYAdapter", "CCGPAdapter", "CEBPubServiceAdapter", "ConfiguredSourceAdapter", "CustomBrowserAdapter",
-    "GSEIAdapter", "GansuGGZYAdapter", "HttpSourceAdapter", "NationalGGZYAdapter",
+    "BingtuanGGZYAdapter", "CCGPAdapter", "CEBPubServiceAdapter", "ChnEnergyEZhaoAdapter", "ConfiguredSourceAdapter", "CustomBrowserAdapter",
+    "DatangAdapter", "GSEIAdapter", "GansuGGZYAdapter", "HttpSourceAdapter", "NationalGGZYAdapter", "PowerChinaAdapter",
     "NingxiaGGZYAdapter", "NingxiaGovernmentPurchaseAdapter", "QinghaiGGZYAdapter",
-    "ShaanxiGGZYAdapter", "ShaanxiGovernmentPurchaseAdapter", "XinjiangGGZYAdapter",
+    "ShaanxiGGZYAdapter", "ShaanxiGovernmentPurchaseAdapter", "ShanxiChangzhiGGZYAdapter", "XinjiangGGZYAdapter",
     "build_adapter",
 ]

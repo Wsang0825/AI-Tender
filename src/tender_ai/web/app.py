@@ -33,7 +33,7 @@ from tender_ai.export import export_search_session
 from tender_ai.review import review_item_dict
 from tender_ai.search import SearchRequest, SearchRunner, parse_search_text
 from tender_ai.sources.registry import SourceRegistry
-from tender_ai.status.engine import recalculate_status
+from tender_ai.status.engine import recalculate_status, with_manual_evidence
 from tender_ai.status.time import as_shanghai, now_shanghai
 from tender_ai.storage.database import create_engine_for, fts5_available, initialize_database, refresh_tender_fts, search_projects, session_scope
 from tender_ai.storage.models import (
@@ -419,7 +419,12 @@ def create_app(*, database: str | None = None) -> FastAPI:
                 save_manual_override(session, project_id, field_name, value, reason=str(form.get("reason") or "Web 人工修正"), changed_by="USER")
                 if field_name in {"project_name", "owner", "agency", "qualification_summary", "participation_method"}:
                     refresh_tender_fts(session, project)
-                decision = recalculate_status(project_to_record(project))
+                gate_evidence = with_manual_evidence(
+                    session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all(),
+                    session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all(),
+                    source_url=project.source_url,
+                )
+                decision = recalculate_status(project_to_record(project), evidences=gate_evidence, require_evidence=True)
                 project.status, project.status_reason = decision.status.value, decision.reason_code
                 project.status_evaluated_at, project.status_rule_version = now_shanghai(), STATUS_RULE_VERSION
                 if old_status != project.status:
@@ -435,7 +440,12 @@ def create_app(*, database: str | None = None) -> FastAPI:
                 clear_manual_override(session, project_id, field_name)
                 project = session.get(Project, project_id)
                 if project is not None:
-                    decision = recalculate_status(project_to_record(project))
+                    gate_evidence = with_manual_evidence(
+                        session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all(),
+                        session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all(),
+                        source_url=project.source_url,
+                    )
+                    decision = recalculate_status(project_to_record(project), evidences=gate_evidence, require_evidence=True)
                     project.status, project.status_reason = decision.status.value, decision.reason_code
                     project.status_evaluated_at, project.status_rule_version = now_shanghai(), STATUS_RULE_VERSION
         return RedirectResponse(url=f"/projects/{project_id}", status_code=303)
@@ -445,7 +455,12 @@ def create_app(*, database: str | None = None) -> FastAPI:
         with session_scope(engine) as session:
             project = session.get(Project, project_id)
             if project is not None:
-                decision = recalculate_status(project_to_record(project))
+                gate_evidence = with_manual_evidence(
+                    session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all(),
+                    session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all(),
+                    source_url=project.source_url,
+                )
+                decision = recalculate_status(project_to_record(project), evidences=gate_evidence, require_evidence=True)
                 old_status = project.status
                 project.status, project.status_reason = decision.status.value, decision.reason_code
                 project.status_evaluated_at, project.status_rule_version = now_shanghai(), STATUS_RULE_VERSION

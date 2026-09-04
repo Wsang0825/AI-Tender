@@ -9,6 +9,7 @@ from tender_ai.config_loader import APP_ROOT
 
 
 BROWSER_PROFILE_ROOT = APP_ROOT.parent / "data" / "browser_profiles"
+DEFAULT_BROWSER = "Microsoft Edge"
 
 
 def browser_profile_path(source_id: str, *, create: bool = False) -> Path:
@@ -19,4 +20,4 @@ def browser_profile_path(source_id: str, *, create: bool = False) -> Path:
     return path
 
 
-__all__ = ["BROWSER_PROFILE_ROOT", "browser_profile_path"]
+__all__ = ["BROWSER_PROFILE_ROOT", "DEFAULT_BROWSER", "browser_profile_path"]

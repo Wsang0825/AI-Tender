@@ -17,9 +17,9 @@ from tender_ai.extractors.tender import ExtractionResult, normalize_detail
 from tender_ai.sources.contracts import DetailPayload
 from tender_ai.sources.registry import SourceDefinition, SourceRegistry
 from tender_ai.status.time import now_shanghai
-from tender_ai.status.engine import recalculate_status
+from tender_ai.status.engine import recalculate_status, with_manual_evidence
 from tender_ai.storage.database import create_engine_for, initialize_database, session_scope
-from tender_ai.storage.models import Announcement, Project, Snapshot
+from tender_ai.storage.models import Announcement, Evidence, ManualOverride, Project, Snapshot
 from tender_ai.storage.repository import add_status_history, project_to_record
 from tender_ai.versioning import STATUS_RULE_VERSION
 
@@ -73,9 +73,13 @@ class ReplayRunner:
 
     @staticmethod
     def _recalculate_project(session: Any, project: Project) -> None:
-        decision = recalculate_status(project_to_record(project), now_shanghai())
+        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
+        overrides = list(session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all())
+        gate_evidence = with_manual_evidence(evidence_rows, overrides, source_url=project.source_url)
+        decision = recalculate_status(project_to_record(project), now_shanghai(), evidences=gate_evidence, require_evidence=True)
         old_status = project.status
         project.status = decision.status.value
+        project.tender_status = project.status
         project.status_reason = decision.reason_code
         project.status_evaluated_at = now_shanghai()
         project.status_rule_version = STATUS_RULE_VERSION

@@ -211,13 +211,20 @@ class SearchProfile:
     max_queries_per_run: int | None = None
     max_queries_per_day: int = 200
     max_results_per_query: int = 8
+    default_search_mode: str = "opportunity"
+    default_result_mode: str = "AUTO"
+    coverage_budget: int | None = None
+    discovery_budget: int = 12
+    enrichment_budget: int = 24
+    verification_budget: int = 12
+    max_verifications_per_session: int = 12
     only_active_opportunities: bool = False
     min_source_level: str = "E"
     schedule_enabled: bool = False
 
     @property
     def query_budget(self) -> int:
-        return self.max_queries_per_run or self.max_search_queries_per_run
+        return self.coverage_budget or self.max_queries_per_run or self.max_search_queries_per_run
 
     def allows_source(self, source_id: str, category: str | None = None) -> bool:
         if self.included_sources and source_id not in self.included_sources:
@@ -354,10 +361,26 @@ def load_region_catalog(config_dir: Path | None = None) -> RegionCatalog:
 
 
 def load_industry_profiles(config_dir: Path | None = None) -> IndustryCatalog:
-    payload = load_yaml("industry_profiles.yaml", config_dir)
+    target_dir = config_dir or DEFAULT_CONFIG_DIR
+    payload = load_yaml("industry_profiles.yaml", target_dir)
     raw_profiles = payload.get("industry_groups") or payload.get("profiles") or []
     if not isinstance(raw_profiles, list):
         raise ValueError("industry_profiles.yaml 的 industry_groups 必须是列表")
+    # Keep the original flat file compatible while allowing future profiles to
+    # be dropped into config/industry_profiles/*.yaml without Python changes.
+    directory = target_dir / "industry_profiles"
+    if directory.exists():
+        for path in sorted(directory.glob("*.yaml")):
+            extra = load_yaml(path.name, directory)
+            values = extra.get("industry_groups") or extra.get("profiles") or []
+            if not isinstance(values, list):
+                raise ValueError(f"{path} 的 industry_groups 必须是列表")
+            raw_profiles = list(raw_profiles) + list(values)
+    by_id: dict[str, Any] = {}
+    for item in raw_profiles:
+        if isinstance(item, Mapping) and item.get("group_id"):
+            by_id[str(item["group_id"])] = item
+    raw_profiles = list(by_id.values())
     profiles = []
     for item in raw_profiles:
         if not isinstance(item, Mapping) or not item.get("group_id"):
@@ -400,6 +423,14 @@ def load_search_profiles(config_dir: Path | None = None) -> SearchProfileRegistr
     return SearchProfileRegistry(profiles)
 
 
+def load_concept_catalog(config_dir: Path | None = None, concept_id: str = "photovoltaic_support"):
+    """Load a concept catalog without creating a config-loader import cycle."""
+
+    from tender_ai.concepts import load_concept_catalog as _load_concept_catalog
+
+    return _load_concept_catalog(config_dir, concept_id)
+
+
 __all__ = [
     "APP_ROOT",
     "DEFAULT_CONFIG_DIR",
@@ -415,5 +446,6 @@ __all__ = [
     "load_keyword_catalog",
     "load_region_catalog",
     "load_search_profiles",
+    "load_concept_catalog",
     "load_yaml",
 ]

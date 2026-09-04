@@ -111,7 +111,7 @@ def save_search_profile(profile_id: str, values: dict[str, Any], *, copy_from: s
             item[key] = _csv(value)
         elif key in {"enabled", "discovery_enabled", "wechat_discovery_enabled", "only_active_opportunities", "schedule_enabled"}:
             item[key] = bool(value)
-        elif key in {"lookback_days", "max_search_queries_per_run", "max_queries_per_run", "max_queries_per_day", "max_results_per_query"}:
+        elif key in {"lookback_days", "max_search_queries_per_run", "max_queries_per_run", "max_queries_per_day", "max_results_per_query", "coverage_budget", "discovery_budget", "enrichment_budget", "verification_budget", "max_verifications_per_session"}:
             item[key] = max(1, int(value))
         elif value is not None:
             item[key] = str(value).strip()

@@ -19,12 +19,12 @@ from tender_ai.matching.dedupe import DedupeOutcome, consolidate_projects, find_
 from tender_ai.models import TenderRecord
 from tender_ai.sources.contracts import DetailPayload
 from tender_ai.sources.registry import SourceDefinition, SourceRegistry
-from tender_ai.status.engine import recalculate_status
+from tender_ai.status.engine import recalculate_status, with_manual_evidence
 from tender_ai.status.metadata import describe_time
 from tender_ai.status.time import now_shanghai
 from tender_ai.storage.database import create_engine_for, initialize_database, refresh_tender_fts, resolve_database_url, session_scope
 from tender_ai.storage.models import (
-    Announcement, Attachment, CodexReviewItem, DocumentParse, Evidence, FieldConflict, Project, ProjectSource, Snapshot,
+    Announcement, Attachment, CodexReviewItem, DocumentParse, Evidence, FieldConflict, ManualOverride, Project, ProjectSource, Snapshot,
     TimeFieldMetadata, TimelineEvent, VerificationTask,
 )
 from tender_ai.storage.repository import project_to_record, save_evidence, save_tender_record
@@ -35,6 +35,7 @@ from tender_ai.versioning import STATUS_RULE_VERSION
 
 EXTRACTION_VERSION = "rule-codex-review-v2"
 DOCUMENT_PARSER_VERSION = "document-pipeline-v2"
+SUPPORTED_ATTACHMENT_SUFFIXES = {".pdf", ".docx", ".xlsx", ".xlsm", ".html", ".htm", ".json"}
 KEY_FIELDS = (
     "project_name", "owner", "purchaser", "agency", "project_type", "project_scale", "capacity_mw", "capacity_mwh",
     "budget", "project_code", "tender_code", "qualification_deadline", "registration_start", "registration_deadline",
@@ -231,9 +232,10 @@ def _upsert_document_parse(
     document: ParsedDocument,
     content_hash_value: str,
     project_id: str | None = None,
+    candidate_id: str | None = None,
     source_id: str | None = None,
 ) -> DocumentParse:
-    row = session.scalar(select(DocumentParse).where(DocumentParse.announcement_id == announcement_id, DocumentParse.attachment_id == attachment_id, DocumentParse.content_hash == content_hash_value))
+    row = session.scalar(select(DocumentParse).where(DocumentParse.announcement_id == announcement_id, DocumentParse.attachment_id == attachment_id, DocumentParse.candidate_id == candidate_id, DocumentParse.content_hash == content_hash_value))
     document_dir = APP_ROOT.parent / "data" / "documents"
     document_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = document_dir / f"{content_hash_value}.md"
@@ -243,6 +245,7 @@ def _upsert_document_parse(
         row = DocumentParse(
             announcement_id=announcement_id,
             attachment_id=attachment_id,
+            candidate_id=candidate_id,
             project_id=project_id,
             source_id=source_id,
             document_type=document.content_type.split("/", 1)[-1],
@@ -271,6 +274,7 @@ def _upsert_document_parse(
         session.add(row)
     else:
         row.project_id = project_id or row.project_id
+        row.candidate_id = candidate_id or row.candidate_id
         row.source_id = source_id or row.source_id
         row.document_type = document.content_type.split("/", 1)[-1]
         row.file_path = document.source_file
@@ -471,16 +475,6 @@ def _save_extraction(session: Any, announcement: Announcement, extraction: Extra
         evidence_rows=evidence_by_field,
     )
     summary.field_conflicts += conflict_count
-    if date_conflict:
-        old_status = project.status
-        project.status = "UNKNOWN"
-        project.status_reason = "UNKNOWN_CONFLICTING_DATES"
-        project.status_evaluated_at = now_shanghai()
-        project.status_rule_version = STATUS_RULE_VERSION
-        if old_status != project.status:
-            from tender_ai.storage.repository import add_status_history
-
-            add_status_history(session, project.project_id, old_status, project.status, project.status_reason)
     _save_time_metadata(session, record, evidence_rows)
     project.document_quality_score = extraction.quality_score
     project.extraction_version = EXTRACTION_VERSION
@@ -491,6 +485,30 @@ def _save_extraction(session: Any, announcement: Announcement, extraction: Extra
     project.canonical_project_name = getattr(record, "canonical_project_name", None) or normalize_identity(record.project_name)
     project.status_rule_version = STATUS_RULE_VERSION
     _set_quality_metrics(project, list(evidence_rows.values()))
+    # The first save above is deliberately provisional because it happens
+    # before Evidence rows exist.  Recalculate once the complete project
+    # evidence set is present; this prevents a field-only deadline from
+    # forcing OPEN/CLOSED.  Existing manual overrides are represented as
+    # strong MANUAL evidence for the gate.
+    all_project_evidence = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
+    active_overrides = list(session.scalars(
+        select(ManualOverride).where(
+            ManualOverride.project_id == project.project_id,
+            ManualOverride.active.is_(True),
+        )
+    ).all())
+    gate_evidence = with_manual_evidence(all_project_evidence, active_overrides, source_url=project.source_url)
+    decision = recalculate_status(project_to_record(project), now_shanghai(), evidences=gate_evidence, require_evidence=True)
+    old_status = project.status
+    project.status = decision.status.value
+    project.tender_status = project.status
+    project.status_reason = decision.reason_code
+    project.status_evaluated_at = now_shanghai()
+    project.status_rule_version = STATUS_RULE_VERSION
+    if old_status != project.status:
+        from tender_ai.storage.repository import add_status_history
+
+        add_status_history(session, project.project_id, old_status, project.status, decision.reason)
     if probable_match is not None:
         candidate = {
             "outcome": probable_match[1].outcome,
@@ -590,7 +608,67 @@ class ExtractionRunner:
             # 以已成功的当前抽取版本作为离线缓存边界；后续新抓取会始终创建 Snapshot。
             query = query.where(DocumentParse.content_hash.is_not(None))
         parsed = session.scalar(query.order_by(DocumentParse.id.desc()))
-        return parsed is not None
+        if parsed is None:
+            return False
+
+        # The main HTML/JSON parse may be cached while a PDF/DOCX/XLSX was
+        # downloaded later or was never parsed successfully.  In that case a
+        # cache hit would silently skip the attachment -> Evidence pipeline.
+        # Treat the announcement as stale until every locally available,
+        # supported attachment has a successful parse for the current parser
+        # version and the same byte hash.
+        attachments = session.scalars(select(Attachment).where(Attachment.announcement_id == announcement.id)).all()
+        for attachment in attachments:
+            local_path = Path(attachment.local_path) if attachment.local_path else None
+            if local_path is None or not local_path.exists() or local_path.suffix.lower() not in SUPPORTED_ATTACHMENT_SUFFIXES:
+                continue
+            attachment_query = select(DocumentParse).where(
+                DocumentParse.announcement_id == announcement.id,
+                DocumentParse.attachment_id == attachment.id,
+                DocumentParse.parser_version == DOCUMENT_PARSER_VERSION,
+                DocumentParse.parse_status == "SUCCESS",
+            )
+            if attachment.content_hash:
+                attachment_query = attachment_query.where(DocumentParse.content_hash == attachment.content_hash)
+            else:
+                attachment_query = attachment_query.where(DocumentParse.source_file == str(local_path))
+            if session.scalar(attachment_query.order_by(DocumentParse.id.desc())) is None:
+                return False
+        return True
+
+    @staticmethod
+    def _account_cached_attachments(session: Any, announcement: Announcement, summary: ExtractionSummary) -> None:
+        """把缓存命中的附件解析结果计入报告，避免文档统计失真。"""
+
+        attachments = session.scalars(select(Attachment).where(Attachment.announcement_id == announcement.id)).all()
+        for attachment in attachments:
+            local_path = Path(attachment.local_path) if attachment.local_path else None
+            if local_path is None or not local_path.exists() or local_path.suffix.lower() not in SUPPORTED_ATTACHMENT_SUFFIXES:
+                continue
+            if local_path.suffix.lower() != ".pdf":
+                continue
+            summary.pdf_count += 1
+            query = select(DocumentParse).where(
+                DocumentParse.announcement_id == announcement.id,
+                DocumentParse.attachment_id == attachment.id,
+                DocumentParse.parser_version == DOCUMENT_PARSER_VERSION,
+            )
+            if attachment.content_hash:
+                query = query.where(DocumentParse.content_hash == attachment.content_hash)
+            parsed = session.scalar(query.order_by(DocumentParse.id.desc()))
+            if parsed is not None and parsed.parse_status == "SUCCESS" and parsed.text_length > 0:
+                summary.pdf_success_count += 1
+            else:
+                summary.pdf_failed_count += 1
+            if parsed is not None and parsed.used_ocr:
+                summary.pdf_ocr_count += 1
+            if parsed is not None and parsed.metadata_json:
+                try:
+                    metadata = json.loads(parsed.metadata_json)
+                except (TypeError, ValueError):
+                    metadata = {}
+                if metadata.get("needs_mineru"):
+                    summary.mineru_fallback_count += 1
 
     def _reuse_cached_status(self, session: Any, announcement: Announcement, summary: ExtractionSummary) -> None:
         project = session.get(Project, announcement.project_id)
@@ -606,7 +684,10 @@ class ExtractionRunner:
         )
         summary.rule_fields_found += cached_fields
         summary.automatic_fields_filled += cached_fields
-        decision = recalculate_status(project_to_record(project), now_shanghai())
+        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
+        overrides = list(session.scalars(select(ManualOverride).where(ManualOverride.project_id == project.project_id, ManualOverride.active.is_(True))).all())
+        gate_evidence = with_manual_evidence(evidence_rows, overrides, source_url=project.source_url)
+        decision = recalculate_status(project_to_record(project), now_shanghai(), evidences=gate_evidence, require_evidence=True)
         if project.status != decision.status.value:
             from tender_ai.storage.repository import add_status_history
 
@@ -616,6 +697,28 @@ class ExtractionRunner:
         project.status_evaluated_at = now_shanghai()
         project.status_rule_version = STATUS_RULE_VERSION
         project.updated_at = now_shanghai()
+        # Cache reuse must still maintain the operational queues.  Otherwise
+        # a legacy announcement can be status-recalculated forever while its
+        # UNKNOWN blockers never reach Codex Review or Verification.
+        prior_review = session.scalar(
+            select(CodexReviewItem)
+            .where(
+                CodexReviewItem.project_id == project.project_id,
+                CodexReviewItem.announcement_id == announcement.id,
+            )
+            .order_by(CodexReviewItem.created_at.desc())
+        )
+        prior_hash = prior_review.content_hash if prior_review is not None else None
+        review_item = ensure_review_item(session, project, announcement=announcement)
+        if review_item is not None:
+            if prior_review is None:
+                summary.codex_review_items += 1
+            elif prior_hash == review_item.content_hash and prior_review.status in {"RESOLVED", "SKIPPED"}:
+                summary.review_cache_hits += 1
+            elif review_item.status == "PENDING":
+                summary.codex_review_items += 1
+        _ensure_verification_task(session, project, summary, dry_run=False)
+        self._account_cached_attachments(session, announcement, summary)
         summary.extraction_cache_hits += 1
         summary.announcements_processed += 1
         if _change_type(announcement.title) != "original":
@@ -626,7 +729,7 @@ class ExtractionRunner:
             summary.closed_count += 1
         else:
             summary.unknown_count += 1
-        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.announcement_id == announcement.id)).all())
+        evidence_rows = list(session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
         evidence_fields = {row.field_name for row in evidence_rows}
         summary.evidence_total += len(TIME_FIELDS)
         summary.evidence_covered += sum(1 for field_name in TIME_FIELDS if field_name in evidence_fields)
@@ -668,7 +771,7 @@ class ExtractionRunner:
             if not attachment.local_path or not Path(attachment.local_path).exists():
                 continue
             suffix = Path(attachment.local_path).suffix.lower()
-            if suffix not in {".pdf", ".docx", ".xlsx", ".xlsm", ".html", ".htm", ".json"}:
+            if suffix not in SUPPORTED_ATTACHMENT_SUFFIXES:
                 continue
             if suffix == ".pdf":
                 summary.pdf_count += 1
@@ -719,6 +822,13 @@ class ExtractionRunner:
         for row in session.scalars(select(DocumentParse)).all():
             if row.announcement_id is not None:
                 documents_by_announcement.setdefault(row.announcement_id, []).append(row)
+        evidence_by_announcement: dict[int, set[str]] = {}
+        evidence_by_project_url: dict[tuple[str, str], set[str]] = {}
+        for row in session.scalars(select(Evidence)).all():
+            if row.announcement_id is not None:
+                evidence_by_announcement.setdefault(row.announcement_id, set()).add(row.field_name)
+            if row.project_id and row.source_url:
+                evidence_by_project_url.setdefault((row.project_id, row.source_url), set()).add(row.field_name)
 
         def tags_for(announcement: Announcement) -> set[str]:
             project = projects.get(announcement.project_id)
@@ -756,7 +866,9 @@ class ExtractionRunner:
         available_counts = Counter(tag for tags in tags_by_id.values() for tag in tags)
         for announcement in rows:
             project = projects.get(announcement.project_id)
-            evidence_fields = {item.field_name for item in session.scalars(select(Evidence).where(Evidence.announcement_id == announcement.id)).all()}
+            evidence_fields = set(evidence_by_announcement.get(announcement.id, set()))
+            if project is not None and announcement.source_url:
+                evidence_fields.update(evidence_by_project_url.get((project.project_id, announcement.source_url), set()))
             checked = [field_name for field_name in TIME_FIELDS if getattr(project, field_name, None) is not None] if project else []
             missing_evidence = [field_name for field_name in checked if field_name not in evidence_fields]
             ok = project is not None and project.status in {"OPEN", "UNKNOWN", "CLOSED"} and not missing_evidence

@@ -86,6 +86,7 @@ def merge_projects(session: Session, winner_id: str, loser_id: str) -> bool:
     from tender_ai.storage.models import (
         Announcement, Attachment, ChangeHistory, Evidence, ManualOverride, Project, ProjectSource,
         StatusHistory, TimeFieldMetadata, TimelineEvent, VerificationResult, VerificationTask,
+        Candidate, SearchSessionProject,
     )
 
     if winner_id == loser_id:
@@ -101,8 +102,10 @@ def merge_projects(session: Session, winner_id: str, loser_id: str) -> bool:
     ):
         if getattr(winner, field_name, None) in (None, "") and getattr(loser, field_name, None) not in (None, ""):
             setattr(winner, field_name, getattr(loser, field_name))
-    for model in (Announcement, Attachment, Evidence, StatusHistory, ChangeHistory, TimelineEvent, VerificationTask, VerificationResult, ManualOverride):
+    for model in (Announcement, Attachment, Evidence, StatusHistory, ChangeHistory, TimelineEvent, VerificationTask, VerificationResult, ManualOverride, SearchSessionProject):
         _move_project_rows(session, model, loser_id, winner_id)
+    for row in session.scalars(select(Candidate).where(Candidate.project_id == loser_id)).all():
+        row.project_id = winner_id
     for row in session.scalars(select(TimeFieldMetadata).where(TimeFieldMetadata.project_id == loser_id)).all():
         duplicate_time = session.scalar(
             select(TimeFieldMetadata).where(

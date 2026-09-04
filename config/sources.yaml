@@ -1,5 +1,5 @@
 version: 1
-description: 来源注册表；第一版只登记来源，不代表已经启用在线采集
+description: 来源注册表；crawl_enabled=true 才表示当前已配置在线采集，registry_only 仅表示登记或目录发现，不代表已经访问成功
 sources:
   - source_id: ccgp
     source_name: 中国政府采购网
@@ -70,7 +70,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 中央政府采购相关来源
+    notes: 中央国家机关政府采购中心（央采网）；当前来源待独立适配
   - source_id: zzcg
     source_name: 中直采购
     category: national
@@ -82,7 +82,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 中直机关采购相关来源
+    notes: 中直机关采购网；当前来源待独立适配
   - source_id: gcycloud
     source_name: 政采商城
     category: national
@@ -94,7 +94,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 政采商城入口
+    notes: 政采云（原登记为政采商城）；当前来源待独立适配
   - source_id: chinatax
     source_name: 税务采购
     category: national
@@ -106,7 +106,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 税务系统公开采购信息入口
+    notes: 税务采购网；当前来源待独立适配
   - source_id: shaanxi_ggzy
     source_name: 陕西省公共资源交易中心
     category: regional
@@ -253,31 +253,38 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 国家电投电子商务平台（电能 e 购）；企业采购入口待按公告页面适配
   - source_id: chng
     source_name: 华能
     category: enterprise
-    base_url: https://www.chng.com.cn/
+    base_url: https://ec.chng.com.cn/
     region: 全国
     enabled: true
     priority: 2
     access_method: http_public
     requires_login: false
     adapter: configured
-    status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    status: NEEDS_ATTENTION
+    crawl_enabled: true
+    notes: 华能集团电子商务平台；实测公开入口返回 HTTP 412，需要用户在独立浏览器完成安全验证后定向重试；未绕过验证
   - source_id: china_cdt
     source_name: 大唐
     category: enterprise
-    base_url: https://www.china-cdt.com/
+    base_url: https://www.cweme.cn/
     region: 全国
     enabled: true
     priority: 2
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    adapter: datang
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 2
+    request_delay_seconds: 0.3
+    rate_limit: 0.3
+    lookback_days: 30
+    notes: 大唐集团电子商务平台；公开公告入口已核验 cweme.cn 的 getList 和 fzggDetail 接口；参与投标仍需用户按官网要求登录
   - source_id: ceic
     source_name: 国能
     category: enterprise
@@ -289,19 +296,20 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 国能 e 购（国家能源集团）；企业采购入口待按公告页面适配
   - source_id: chd
     source_name: 华电
     category: enterprise
-    base_url: https://www.chd.com.cn/
+    base_url: https://www.chdtp.com/pages/wzglS/homepage/index.jsp
     region: 全国
     enabled: true
     priority: 2
     access_method: http_public
     requires_login: false
     adapter: configured
-    status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    status: NEEDS_ATTENTION
+    crawl_enabled: true
+    notes: 中国华电集团电子商务平台；已核验主页，但公开公告列表实测返回 HTTP 412，需要用户在独立浏览器完成安全验证后定向重试；未绕过验证
   - source_id: cgn
     source_name: 中广核
     category: enterprise
@@ -313,7 +321,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中广核电子商务平台；企业采购入口待按公告页面适配
   - source_id: crc
     source_name: 华润
     category: enterprise
@@ -325,7 +333,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 华润守正电子招标平台；企业采购入口待按公告页面适配
   - source_id: ctg
     source_name: 三峡
     category: enterprise
@@ -337,7 +345,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国三峡电子采购平台；企业采购入口待按公告页面适配
   - source_id: cecic
     source_name: 中国节能
     category: enterprise
@@ -349,7 +357,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国节能慧采云平台；企业采购入口待按公告页面适配
   - source_id: sdic
     source_name: 国投
     category: enterprise
@@ -361,19 +369,43 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 国投集团电子采购平台；企业采购入口待按公告页面适配
   - source_id: powerchina
     source_name: 中国电建
     category: enterprise
-    base_url: https://www.powerchina.cn/
+    base_url: https://bid.powerchina.cn/
     region: 全国
     enabled: true
     priority: 1
     access_method: http_public
     requires_login: false
-    adapter: configured
-    status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    adapter: powerchina
+    adapter_level: API
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 2
+    request_delay_seconds: 0.5
+    rate_limit: 0.5
+    lookback_days: 30
+    notes: 中国电建阳光采购平台（中国电建阳光采购网）；已核验公开 BidAnnouncementSummary/list、getInfo 和 downloadPdf 接口
+  - source_id: shanxi_changzhi_ggzy
+    source_name: 山西省公共资源交易平台（长治市）
+    category: regional
+    base_url: https://ggzy.changzhi.gov.cn/
+    region: 山西
+    enabled: true
+    priority: 2
+    access_method: http_public
+    requires_login: false
+    adapter: shanxi_changzhi_ggzy
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
+    request_delay_seconds: 0.3
+    rate_limit: 0.3
+    lookback_days: 30
+    notes: 已核验长治市 front/notice/list 和 front/notice/detail 公共 HTML 路径；其他山西市县由目录发现后逐站增加配置
   - source_id: ceec
     source_name: 中国能建
     category: enterprise
@@ -385,7 +417,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国能建电子采购平台；企业采购入口待按公告页面适配
   - source_id: sgcc_ecp
     source_name: 国网ECP
     category: enterprise
@@ -397,7 +429,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 国家电网电子商务平台入口
+    notes: 国网电子商务平台 ECP；国家电网电子商务平台入口待独立适配
   - source_id: csg
     source_name: 南网
     category: enterprise
@@ -409,7 +441,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 南方电网公开来源
+    notes: 南方电网供应链统一服务平台；南方电网公开来源待独立适配
   - source_id: inner_mongolia_power
     source_name: 内蒙古电力
     category: enterprise
@@ -421,7 +453,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 内蒙古电力集团电子采购平台；企业采购入口待按公告页面适配
   - source_id: cnpc
     source_name: 中石油
     category: enterprise
@@ -433,7 +465,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国石油招标投标网；企业采购入口待按公告页面适配
   - source_id: sinopec
     source_name: 中石化
     category: enterprise
@@ -445,7 +477,7 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国石化电子招标投标交易平台；企业采购入口待按公告页面适配
   - source_id: cnooc
     source_name: 中海油
     category: enterprise
@@ -457,4 +489,165 @@ sources:
     requires_login: false
     adapter: configured
     status: registry_only
-    notes: 企业采购入口待按公告页面适配
+    notes: 中国海油采办业务管理与交易系统；企业采购入口待按公告页面适配
+  - source_id: ceic_e_zhao
+    source_name: 国能e招
+    category: enterprise
+    base_url: https://www.chnenergybidding.com.cn/bidweb/
+    region: 全国
+    enabled: true
+    priority: 1
+    access_method: http_public
+    requires_login: false
+    adapter: chnenergy_e_zhao
+    adapter_level: CUSTOM_HTTP
+    status: ACTIVE
+    crawl_enabled: true
+    max_pages: 1
+    request_delay_seconds: 0.2
+    rate_limit: 0.2
+    lookback_days: 30
+    notes: 国能 e 招公开公告；已核验静态列表、分页和详情路径；登录/投标操作仍由用户在官网完成
+
+  # 全国海量省、市、区县子站点不逐条硬编码。以下是来源家族目录，实际接入时
+  # 通过全国公共资源交易平台总站或对应官方目录发现具体子站，再建立独立 Adapter。
+  - source_id: provincial_ggzy_catalog
+    source_name: 各省级公共资源交易平台
+    category: regional
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 2
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 通过全国公共资源交易平台总站跳转发现各省平台；具体子站需单独适配
+  - source_id: provincial_govprocurement_catalog
+    source_name: 各省级政府采购网
+    category: regional
+    base_url: https://www.ccgp.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 2
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 通过中国政府采购网及各省官方目录发现；具体省站需单独适配
+  - source_id: city_ggzy_catalog
+    source_name: 各地市公共资源交易中心网站
+    category: regional
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 3
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 通过全国公共资源交易平台总站跳转；不把总站跳转误报为已访问全部地市站点
+  - source_id: county_ggzy_catalog
+    source_name: 各区县公共资源交易中心网站
+    category: regional
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 4
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 通过全国公共资源交易平台总站或省级目录发现；具体区县站点需单独适配
+  - source_id: provincial_e_tender_catalog
+    source_name: 各省市电子招标投标公共服务平台
+    category: regional
+    base_url: https://bulletin.cebpubservice.com/
+    region: 全国
+    enabled: true
+    priority: 2
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 通过中国招标投标公共服务平台和省市公开目录发现；具体站点需单独适配
+  - source_id: transport_tender_catalog
+    source_name: 各省市交通工程招投标平台
+    category: regional
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 3
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 交通工程子平台来源家族；通过总站/省市官方目录发现，未逐站适配
+  - source_id: water_tender_catalog
+    source_name: 各省市水利工程招投标平台
+    category: regional
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 3
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 水利工程子平台来源家族；通过总站/省市官方目录发现，未逐站适配
+  - source_id: provincial_soe_sunshine_catalog
+    source_name: 各省国企阳光采购平台
+    category: enterprise
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 3
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 省属国企阳光采购来源家族；具体平台需发现并单独适配
+  - source_id: provincial_energy_enterprise_catalog
+    source_name: 各省属能源集团电子采购平台
+    category: enterprise
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 3
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 省属能源集团来源家族；通过官方目录和 Discovery 发现，未逐站适配
+  - source_id: city_investment_sunshine_catalog
+    source_name: 各省市城投集团阳光采购平台
+    category: enterprise
+    base_url: https://www.ggzy.gov.cn/
+    region: 全国
+    enabled: true
+    priority: 4
+    access_method: catalog_discovery
+    requires_login: false
+    adapter: registry_catalog
+    adapter_level: CATALOG
+    status: registry_only
+    crawl_enabled: false
+    notes: 城投集团阳光采购来源家族；具体平台需发现并单独适配

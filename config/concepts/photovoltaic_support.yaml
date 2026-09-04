@@ -1,0 +1,59 @@
+version: 1
+concept_id: photovoltaic_support
+name: 光伏支架及相关招标机会
+concept_groups:
+  - group_id: direct
+    relations: [direct]
+    priority: 1
+    terms: [光伏支架, 支架系统, 支架采购, 支架安装, 组件支架, 柔性支架, 固定支架, 水面光伏支架]
+  - group_id: components
+    relations: [component]
+    priority: 2
+    terms: [支架基础, 预埋件, 檩条, 连接件, 支架螺栓, 支架防腐]
+  - group_id: structures
+    relations: [structural_related, adjacent]
+    priority: 2
+    terms: [光伏车棚, 光伏雨棚, 钢结构, 支架加固, 支架防风改造]
+  - group_id: activities
+    relations: [structural_related, embedded]
+    priority: 3
+    terms: [安装, 加固, 改造, 施工, 运维]
+  - group_id: parent_projects
+    relations: [parent_project, embedded]
+    priority: 3
+    terms: [分布式光伏, 屋顶光伏, 农光互补, 光伏电站, 光伏项目]
+  - group_id: contract_modes
+    relations: [contract_scope, embedded]
+    priority: 3
+    terms: [EPC, PC, 施工总承包, 专业分包, 设备材料]
+query_matrix:
+  - group_id: contextual_solar_steel
+    groups: [parent_projects, structures]
+    relations: [structural_related, parent_project]
+    priority: 2
+    terms: [光伏, 钢结构]
+  - group_id: contextual_solar_epc
+    groups: [parent_projects, contract_modes]
+    relations: [embedded, contract_scope]
+    priority: 2
+    terms: [光伏, EPC]
+  - group_id: contextual_solar_carport
+    groups: [parent_projects, structures]
+    relations: [structural_related]
+    priority: 2
+    terms: [光伏, 车棚]
+  - group_id: contextual_solar_reinforcement
+    groups: [parent_projects, activities]
+    relations: [structural_related]
+    priority: 2
+    terms: [光伏, 加固]
+  - group_id: contextual_distributed_support
+    groups: [parent_projects, direct]
+    relations: [embedded, direct]
+    priority: 2
+    terms: [分布式光伏, 支架]
+  - group_id: contextual_agrivoltaic_support
+    groups: [parent_projects, direct]
+    relations: [embedded, direct]
+    priority: 3
+    terms: [农光互补, 支架]

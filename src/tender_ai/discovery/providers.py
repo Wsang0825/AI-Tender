@@ -17,7 +17,33 @@ from tender_ai.discovery.contracts import SearchResult
 
 
 class SearchProviderError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        manual_action_required: bool = False,
+        manual_action_type: str | None = None,
+        http_status: int | None = None,
+        url: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.manual_action_required = manual_action_required
+        self.manual_action_type = manual_action_type
+        self.http_status = http_status
+        self.url = url
+
+
+def _manual_action_from_error(error: BaseException, http_status: int | None = None) -> str | None:
+    """识别搜索服务的登录、验证码和人机验证错误。"""
+
+    message = str(error).casefold()
+    if any(token in message for token in ("验证码", "captcha")):
+        return "CAPTCHA"
+    if any(token in message for token in ("请登录", "登录后", "login required", "sign in", "session expired")):
+        return "LOGIN_REQUIRED"
+    if http_status == 412 or any(token in message for token in ("412", "challenge", "verify you are human", "人机验证", "安全验证")):
+        return "VERIFICATION_REQUIRED"
+    return None
 
 
 class DDGSProvider:
@@ -53,7 +79,12 @@ class DDGSProvider:
             if "no results found" in str(exc).casefold():
                 rows = []
             else:
-                raise SearchProviderError(f"DDGS 搜索失败: {exc}") from exc
+                action = _manual_action_from_error(exc)
+                raise SearchProviderError(
+                    f"DDGS 搜索失败: {exc}",
+                    manual_action_required=bool(action),
+                    manual_action_type=action,
+                ) from exc
         result: list[SearchResult] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -109,9 +140,25 @@ class SearXNGProvider:
             response = self._client.get(f"{self.base_url}/search?{urlencode({'q': query, 'format': 'json'})}")
             response.raise_for_status()
             payload = response.json()
-        except Exception as exc:
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            action = _manual_action_from_error(exc, status)
             self.health = "DEGRADED"
-            raise SearchProviderError(f"SearXNG 搜索失败: {exc}") from exc
+            raise SearchProviderError(
+                f"SearXNG 搜索失败: {exc}",
+                manual_action_required=bool(action),
+                manual_action_type=action,
+                http_status=status,
+                url=str(exc.response.url) if exc.response is not None else f"{self.base_url}/search",
+            ) from exc
+        except Exception as exc:
+            action = _manual_action_from_error(exc)
+            self.health = "DEGRADED"
+            raise SearchProviderError(
+                f"SearXNG 搜索失败: {exc}",
+                manual_action_required=bool(action),
+                manual_action_type=action,
+            ) from exc
         result = [
             SearchResult(
                 title=str(row.get("title") or "").strip(),
@@ -153,6 +200,9 @@ class FallbackSearchProvider:
 
     def search(self, query: str, *, max_results: int = 10) -> list[SearchResult]:
         errors: list[str] = []
+        manual_action_type: str | None = None
+        manual_http_status: int | None = None
+        manual_url: str | None = None
         for provider in self.providers:
             if not getattr(provider, "enabled", True):
                 continue
@@ -160,7 +210,17 @@ class FallbackSearchProvider:
                 return provider.search(query, max_results=max_results)
             except SearchProviderError as exc:
                 errors.append(f"{getattr(provider, 'name', type(provider).__name__)}: {exc}")
-        raise SearchProviderError("所有 SearchProvider 均失败: " + "; ".join(errors))
+                if exc.manual_action_required and manual_action_type is None:
+                    manual_action_type = exc.manual_action_type or "MANUAL_ACTION_REQUIRED"
+                    manual_http_status = exc.http_status
+                    manual_url = exc.url
+        raise SearchProviderError(
+            "所有 SearchProvider 均失败: " + "; ".join(errors),
+            manual_action_required=manual_action_type is not None,
+            manual_action_type=manual_action_type,
+            http_status=manual_http_status,
+            url=manual_url,
+        )
 
     def close(self) -> None:
         for provider in self.providers:

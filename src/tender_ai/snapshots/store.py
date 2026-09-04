@@ -60,6 +60,7 @@ class SnapshotStore:
         content_type: str = "application/octet-stream",
         source_id: str | None = None,
         announcement_id: int | None = None,
+        candidate_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> Snapshot:
         digest = content_hash(content)
@@ -67,6 +68,8 @@ class SnapshotStore:
         if existing is not None:
             if existing.announcement_id is None and announcement_id is not None:
                 existing.announcement_id = announcement_id
+            if existing.candidate_id is None and candidate_id is not None:
+                existing.candidate_id = candidate_id
             return existing
         snapshot_id = uuid4().hex
         target_dir = self.root / (source_id or "unknown")
@@ -83,6 +86,7 @@ class SnapshotStore:
             file_path=str(target),
             source_id=source_id,
             announcement_id=announcement_id,
+            candidate_id=candidate_id,
             metadata_json=json.dumps(metadata or {}, ensure_ascii=False, default=str),
         )
         session.add(row)

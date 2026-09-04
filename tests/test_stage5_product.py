@@ -13,7 +13,7 @@ from tender_ai.search import SearchRequest, build_source_plan
 from tender_ai.snapshots.store import SnapshotStore
 from tender_ai.status.time import now_shanghai
 from tender_ai.storage.database import create_engine_for, initialize_database, refresh_tender_fts, search_projects, session_scope
-from tender_ai.storage.models import Announcement, CodexReviewItem, DocumentParse, Project, SearchSession, SearchSessionProject
+from tender_ai.storage.models import Announcement, Attachment, CodexReviewItem, DocumentParse, Project, SearchSession, SearchSessionProject
 from tender_ai.templates import list_templates, save_template
 from tender_ai.urls import content_hash
 from tender_ai.web.app import create_app
@@ -26,7 +26,8 @@ def test_structured_request_round_trip_and_dynamic_source_plan():
     assert restored.industries == ("solar", "storage")
     plan = build_source_plan(request)
     selected = {row["source_id"] for row in plan if row["selected"]}
-    assert selected == {"ccgp", "ggzy", "cebpubservice"}
+    assert {"ccgp", "ggzy", "cebpubservice"}.issubset(selected)
+    assert all(row["reason"] != "ADAPTER_NOT_CONFIGURED" for row in plan if row["source_id"] in selected)
     assert all(row["region"] == "全国" for row in plan if row["selected"])
 
 
@@ -123,6 +124,85 @@ def test_search_reuses_unchanged_document_extraction_cache(tmp_path):
     summary = ExtractionRunner(database=str(database)).run(sample_size=1, consolidate=False, reuse_cached=True)
     assert summary.extraction_cache_hits == 1
     assert summary.pdf_count == 0
+
+
+def test_extraction_cache_requires_and_reports_current_attachment_parse(tmp_path):
+    database = tmp_path / "attachment-cache.db"
+    pdf_path = tmp_path / "notice.pdf"
+    pdf_path.write_bytes(b"cached pdf bytes")
+    engine = initialize_database(create_engine_for(database))
+    with session_scope(engine) as session:
+        project = Project(
+            project_id="attachment-cache-project",
+            project_name="附件缓存项目",
+            status="UNKNOWN",
+            status_reason="UNKNOWN_NO_PARTICIPATION_DEADLINE",
+            extraction_version=EXTRACTION_VERSION,
+            created_at=now_shanghai(),
+            updated_at=now_shanghai(),
+        )
+        session.add(project)
+        session.flush()
+        announcement = Announcement(
+            project_id=project.project_id,
+            title="附件缓存项目公告",
+            source_url="https://example.test/attachment-cache",
+            content_hash=content_hash("附件缓存项目公告"),
+            extraction_status="SUCCESS",
+            extraction_version=EXTRACTION_VERSION,
+        )
+        session.add(announcement)
+        session.flush()
+        snapshot = SnapshotStore(tmp_path / "snapshots").save_text(
+            session,
+            source_url=announcement.source_url,
+            text="附件缓存项目公告",
+            content_type="text/html",
+            announcement_id=announcement.id,
+        )
+        announcement.snapshot_id = snapshot.snapshot_id
+        session.add(
+            DocumentParse(
+                announcement_id=announcement.id,
+                project_id=project.project_id,
+                content_hash=snapshot.sha256,
+                content_type="text/html",
+                parser="html.beautifulsoup_rule",
+                parser_version=DOCUMENT_PARSER_VERSION,
+                parse_status="SUCCESS",
+                text_length=8,
+            )
+        )
+        attachment = Attachment(
+            project_id=project.project_id,
+            announcement_id=announcement.id,
+            file_name="notice.pdf",
+            local_path=str(pdf_path),
+            mime_type="application/pdf",
+            content_hash="pdf-hash",
+        )
+        session.add(attachment)
+        session.flush()
+        assert not ExtractionRunner._cached_extraction(session, announcement, snapshot)
+        session.add(
+            DocumentParse(
+                announcement_id=announcement.id,
+                attachment_id=attachment.id,
+                project_id=project.project_id,
+                content_hash="pdf-hash",
+                content_type="application/pdf",
+                parser="pymupdf4llm",
+                parser_version=DOCUMENT_PARSER_VERSION,
+                parse_status="SUCCESS",
+                text_length=20,
+            )
+        )
+        session.flush()
+        assert ExtractionRunner._cached_extraction(session, announcement, snapshot)
+    summary = ExtractionRunner(database=str(database)).run(sample_size=1, consolidate=False, reuse_cached=True)
+    assert summary.extraction_cache_hits == 1
+    assert summary.pdf_count == 1
+    assert summary.pdf_success_count == 1
 
 
 def test_chinese_project_search_falls_back_when_fts_tokenizer_misses(tmp_path):

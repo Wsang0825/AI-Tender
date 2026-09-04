@@ -1,0 +1,93 @@
+benchmark_id: recall_2026_08_17_31
+window_start: '2026-08-17'
+window_end: '2026-08-31'
+intent: '陕西光伏支架相关/关联业务机会；并用三组非陕西真实持久化项目检验地区条件不是陕西硬编码'
+source_artifacts:
+  - output/sessions/search_20260831_180208_a5d128ac/search_report.md
+
+# 这些案例来自已有真实检索报告或当前 tender.db。未在本地语料中的陕西案例
+# 明确标记为 UNAVAILABLE_IN_LOCAL_CORPUS，不构成“官方没有项目”的结论。
+cases:
+  - case_id: sx_shenmu_5_97mwp
+    region: 陕西省
+    title_terms: ['榆林光伏项目', '5.97MWp']
+    expected_class: DIRECT
+    availability: SEED_ONLY_REAL_REPORT
+    source_artifact: output/sessions/search_20260831_180208_a5d128ac/search_report.md
+    source_url: https://www.sjyunc.com/portal/detail.do?chnlcode=tender&docid=8feddf4a0fda47578bdb0de1975c211a&objtype=2
+    notes: '已有真实检索报告记录；当前生产库没有对应 Project 行，不能伪造入库。'
+  - case_id: sx_huangling_6mwp
+    region: 陕西省
+    title_terms: ['黄陵矿业', '分布式光伏二期']
+    expected_class: EMBEDDED
+    availability: SEED_ONLY_REAL_REPORT
+    source_artifact: output/sessions/search_20260831_180208_a5d128ac/search_report.md
+    source_url: https://www.qianlima.com/bid-626369546.html
+    notes: '二手线索；报告明确官方公告未找到，且不是独立支架货物采购。'
+  - case_id: sx_xian_post_carport
+    region: 陕西省
+    title_terms: ['西安邮电大学', 'T字型光伏车棚']
+    expected_class: STRUCTURAL_RELATED
+    availability: SEED_ONLY_REAL_REPORT
+    source_artifact: output/sessions/search_20260831_180208_a5d128ac/search_report.md
+    source_url: https://jishoushi.jrzb.com/purchases/2026-08-28.ab77e1022e577a098cd291185638b223
+    notes: '二手线索；车棚钢结构机会，不等于普通地面组件支架采购。'
+  - case_id: sx_weinan_qiancun
+    region: 陕西省
+    title_terms: ['渭南光明电力集团', '千村万户']
+    expected_class: DIRECT
+    availability: PERSISTED_REAL_PROJECT
+    source_artifact: output/sessions/search_20260831_180208_a5d128ac/search_report.md
+    source_url: https://www.sxggzyjy.cn/jydt/001001/001001001/001001001001/20260825/5c5e2306-90a9-4f09-a05f-17b11c1939cd.html
+    project_id: 1dbd00544670ebda317ef75c69b723f7
+    notes: '当前 tender.db 有对应 Project；官方报告记录了光伏支架包件和文件截止时间。'
+  - case_id: sx_yichuan_150mwp_reinforcement
+    region: 陕西省
+    title_terms: ['宜川', '150MW', '加固']
+    expected_class: STRUCTURAL_RELATED
+    availability: UNAVAILABLE_IN_LOCAL_CORPUS
+    notes: '用户提供的已知漏项名称；当前本地数据库和已保存报告未找到可核对原文，不计为 Recall 通过。'
+  - case_id: sx_shaanxi_transport_highway_pv
+    region: 陕西省
+    title_terms: ['陕西交控', '高速路域光伏']
+    expected_class: EMBEDDED
+    availability: UNAVAILABLE_IN_LOCAL_CORPUS
+    notes: '用户提供的已知漏项名称；当前本地语料无真实可核对记录。'
+  - case_id: sx_xian_silk_rail_park
+    region: 陕西省
+    title_terms: ['丝路轨道交通产业园', '光伏']
+    expected_class: PARENT_PROJECT
+    availability: UNAVAILABLE_IN_LOCAL_CORPUS
+    notes: '用户提供的已知漏项名称；当前本地语料无真实可核对记录。'
+  - case_id: sx_changqing_pv_power_support
+    region: 陕西省
+    title_terms: ['长庆油田', '含光伏', '支架询价']
+    expected_class: SECONDARY_LEAD
+    availability: SEED_ONLY_REAL_REPORT
+    source_artifact: output/sessions/search_20260831_180208_a5d128ac/search_report.md
+    source_url: https://www.bidcenter.com.cn/news-436850467-1.html
+    notes: '二手线索；报告记录官方公告未找到且日期存在冲突。'
+  - case_id: qinghai_zaduo_clean_energy
+    region: 青海省
+    title_terms: ['杂多县昂赛乡', '清洁能源智慧供暖']
+    expected_class: PARENT_PROJECT
+    availability: PERSISTED_REAL_PROJECT
+    source_url: https://www.qhggzyjy.gov.cn/yus/jyxx/001002/001002001/20260817/2402954262393312.html
+    project_id: 0e3a7d4f826e72153e2256f9ec7cc250
+    notes: '当前 tender.db 真实持久化项目，用于验证地区参数可迁移。'
+  - case_id: ningxia_shizuishan_pv_grid_access
+    region: 宁夏回族自治区
+    title_terms: ['石嘴山市100万千瓦光伏发电复合项目', '接入系统设计']
+    expected_class: PARENT_PROJECT
+    availability: PERSISTED_REAL_PROJECT
+    source_url: https://ggzyjy.fzggw.nx.gov.cn/dzjy/001001/001001001/001001001006/20260826/0965b647-f417-4d46-b8e7-47f2e0eb4e4a.html
+    project_id: 5ab8411fec7adb4ea27a547f275ec1fc
+    notes: '当前 tender.db 真实持久化项目，用于验证地区参数可迁移。'
+  - case_id: xinjiang_bingtuan_tianying_green_power
+    region: 新疆生产建设兵团
+    title_terms: ['天盈石化绿电直连项目', 'EPC总承包']
+    expected_class: EMBEDDED
+    availability: PERSISTED_REAL_PROJECT
+    source_url: https://ggzy.xjbt.gov.cn/jygk/004001/004001004/004001004003/20260825/d6d931fd-6b97-41b8-8932-6ce9bbf52244.html
+    project_id: 8e3c4f8f182240ad7537fcbebc2fed50
+    notes: '当前 tender.db 真实持久化项目，用于验证兵团地区参数可迁移。'

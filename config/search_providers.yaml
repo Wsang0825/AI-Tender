@@ -16,3 +16,9 @@ providers:
     enabled: false
     daily_query_limit: 0
     cooldown_seconds: 0
+  - name: weixin_public_index
+    priority: 3
+    enabled: true
+    daily_query_limit: 200
+    cooldown_seconds: 0
+    description: 通过公开搜索引擎索引发现 mp.weixin.qq.com 文章；不登录微信、不绕过访问控制

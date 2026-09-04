@@ -63,6 +63,11 @@ class Project(Base):
     first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNKNOWN", index=True)
+    # Candidate discovery and tender status are deliberately independent.  The
+    # legacy ``status`` column remains the canonical status-engine field for
+    # backwards compatibility; ``tender_status`` is the explicit public name
+    # used by the candidate/enrichment layer.
+    tender_status: Mapped[str | None] = mapped_column(String(16), index=True)
     status_reason: Mapped[str | None] = mapped_column(String(128), index=True)
     status_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False, default="NEW", index=True)
@@ -86,6 +91,21 @@ class Project(Base):
     needs_codex_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     review_reason: Mapped[str | None] = mapped_column(Text)
     status_rule_version: Mapped[str | None] = mapped_column(String(64))
+    relevance_class: Mapped[str | None] = mapped_column(String(32), index=True)
+    verification_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    enrichment_state: Mapped[str | None] = mapped_column(String(32), index=True)
+    blocker: Mapped[str | None] = mapped_column(String(64), index=True)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    identity_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    identity_confidence: Mapped[float | None] = mapped_column(Float)
+    relation_types_json: Mapped[str | None] = mapped_column(Text)
+    matched_concepts_json: Mapped[str | None] = mapped_column(Text)
+    missing_fields_json: Mapped[str | None] = mapped_column(Text)
+    project_location: Mapped[str | None] = mapped_column(String(500), index=True)
+    tenderer_location: Mapped[str | None] = mapped_column(String(500))
+    agency_location: Mapped[str | None] = mapped_column(String(500))
+    source_location: Mapped[str | None] = mapped_column(String(500))
+    rank_score: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
 
@@ -187,6 +207,7 @@ class Evidence(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.project_id"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
     announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
     field_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
     normalized_value: Mapped[str | None] = mapped_column(Text)
@@ -326,6 +347,7 @@ class Snapshot(Base):
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
     announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
     metadata_json: Mapped[str | None] = mapped_column(Text)
 
 
@@ -382,6 +404,7 @@ class DocumentParse(Base):
     document_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, default=lambda: uuid4().hex)
     announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
     attachment_id: Mapped[int | None] = mapped_column(ForeignKey("attachments.id"), index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
     project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.project_id"), index=True)
     source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
     document_type: Mapped[str | None] = mapped_column(String(64))
@@ -477,6 +500,8 @@ class SearchSession(Base):
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     request_id: Mapped[str | None] = mapped_column(String(128), index=True)
     request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    search_mode: Mapped[str | None] = mapped_column(String(32), index=True)
+    result_mode: Mapped[str | None] = mapped_column(String(32), index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="RUNNING", index=True)
@@ -492,9 +517,218 @@ class SearchSession(Base):
     closed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     review_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     verification_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_pool_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reopened_candidate_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enrichment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     errors_json: Mapped[str | None] = mapped_column(Text)
     sources_json: Mapped[str | None] = mapped_column(Text)
     source_plan_json: Mapped[str | None] = mapped_column(Text)
+    coverage_manifest_json: Mapped[str | None] = mapped_column(Text)
+    quality_metrics_json: Mapped[str | None] = mapped_column(Text)
+
+
+class Candidate(Base):
+    """Durable recall layer between discovery and verified Project records.
+
+    A Candidate is intentionally allowed to be incomplete, secondary-only,
+    blocked, or unrelated to a persisted Project.  Search filters may hide it
+    from a particular presentation, but they must not delete the recall fact.
+    """
+
+    __tablename__ = "candidates"
+    __table_args__ = (UniqueConstraint("candidate_key", name="uq_candidates_candidate_key"),)
+
+    candidate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    candidate_key: Mapped[str] = mapped_column(String(256), nullable=False, unique=True, index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.project_id"), index=True)
+    announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
+    search_session_id: Mapped[str | None] = mapped_column(ForeignKey("search_sessions.session_id"), index=True)
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    raw_title: Mapped[str | None] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    original_url: Mapped[str | None] = mapped_column(Text)
+    canonical_url: Mapped[str | None] = mapped_column(Text, index=True)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    source_domain: Mapped[str | None] = mapped_column(String(256), index=True)
+    source_level: Mapped[str | None] = mapped_column(String(8), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    relevance_class: Mapped[str] = mapped_column(String(32), nullable=False, default="POSSIBLE", index=True)
+    verification_status: Mapped[str] = mapped_column(String(32), nullable=False, default="DISCOVERY_LEAD", index=True)
+    tender_status: Mapped[str] = mapped_column(String(16), nullable=False, default="UNKNOWN", index=True)
+    enrichment_state: Mapped[str] = mapped_column(String(32), nullable=False, default="NEW", index=True)
+    identity_status: Mapped[str] = mapped_column(String(32), nullable=False, default="UNRESOLVED", index=True)
+    identity_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    blocker: Mapped[str | None] = mapped_column(String(64), index=True)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    candidate_class: Mapped[str | None] = mapped_column(String(64), index=True)
+    relation_types_json: Mapped[str | None] = mapped_column(Text)
+    matched_concepts_json: Mapped[str | None] = mapped_column(Text)
+    missing_fields_json: Mapped[str | None] = mapped_column(Text)
+    candidate_values_json: Mapped[str | None] = mapped_column(Text)
+    evidence_ids_json: Mapped[str | None] = mapped_column(Text)
+    source_ids_json: Mapped[str | None] = mapped_column(Text)
+    official_found: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    rank_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, index=True)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, index=True)
+    enrichment_stop_reason: Mapped[str | None] = mapped_column(String(64), index=True)
+    review_priority: Mapped[int] = mapped_column(Integer, nullable=False, default=5, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
+    last_enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_change_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    persisted_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
+
+
+class CandidateSource(Base):
+    """Source pivot for all URLs that support one Candidate identity."""
+
+    __tablename__ = "candidate_sources"
+    __table_args__ = (UniqueConstraint("candidate_id", "canonical_url", name="uq_candidate_source_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    original_url: Mapped[str | None] = mapped_column(Text)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    source_domain: Mapped[str | None] = mapped_column(String(256), index=True)
+    source_name: Mapped[str | None] = mapped_column(String(256))
+    source_level: Mapped[str | None] = mapped_column(String(8), index=True)
+    source_type: Mapped[str | None] = mapped_column(String(64))
+    provider: Mapped[str | None] = mapped_column(String(64))
+    source_title: Mapped[str | None] = mapped_column(String(500))
+    snippet: Mapped[str | None] = mapped_column(Text)
+    source_location: Mapped[str | None] = mapped_column(String(500))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    is_official: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    is_secondary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    access_status: Mapped[str] = mapped_column(String(32), nullable=False, default="DISCOVERED")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, onupdate=now_shanghai, nullable=False)
+
+
+class CandidateEnrichmentQuery(Base):
+    __tablename__ = "candidate_enrichment_queries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    search_session_id: Mapped[str | None] = mapped_column(ForeignKey("search_sessions.session_id"), index=True)
+    parent_query_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_enrichment_queries.id"), index=True)
+    query_text: Mapped[str] = mapped_column(String(1000), nullable=False)
+    strategy: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    round_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    provider: Mapped[str | None] = mapped_column(String(64))
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    results_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_fact_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    new_source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    query_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+
+
+class CandidateEnrichmentResult(Base):
+    """One durable result returned by one recursive enrichment query.
+
+    ``CandidateSource`` stores the source pivot; this table keeps the query
+    provenance as well, so a later audit can answer which strategy found a
+    URL and which seed candidate it was meant to enrich.
+    """
+
+    __tablename__ = "candidate_enrichment_results"
+    __table_args__ = (UniqueConstraint("query_id", "canonical_url", name="uq_candidate_enrichment_result"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    query_id: Mapped[int] = mapped_column(ForeignKey("candidate_enrichment_queries.id"), nullable=False, index=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    discovered_candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
+    search_session_id: Mapped[str | None] = mapped_column(ForeignKey("search_sessions.session_id"), index=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    snippet: Mapped[str | None] = mapped_column(Text)
+    provider: Mapped[str | None] = mapped_column(String(64))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    source_level: Mapped[str | None] = mapped_column(String(8), index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    identity_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    relevance_class: Mapped[str | None] = mapped_column(String(32), index=True)
+    is_official: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    is_secondary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    match_type: Mapped[str | None] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class CandidateAttachment(Base):
+    """附件闭环 for a candidate that has not yet become a Project.
+
+    Project ``Attachment`` remains the canonical project-level table.  This
+    small parallel record is necessary because discovery candidates may be
+    secondary-only or incomplete and therefore have no project_id yet.
+    """
+
+    __tablename__ = "candidate_attachments"
+    __table_args__ = (UniqueConstraint("candidate_id", "canonical_url", name="uq_candidate_attachment_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    enrichment_result_id: Mapped[int | None] = mapped_column(ForeignKey("candidate_enrichment_results.id"), index=True)
+    source_url: Mapped[str] = mapped_column(Text, nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    file_name: Mapped[str | None] = mapped_column(String(500))
+    local_path: Mapped[str | None] = mapped_column(Text)
+    mime_type: Mapped[str | None] = mapped_column(String(128))
+    content_hash: Mapped[str | None] = mapped_column(String(128), index=True)
+    snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("snapshots.snapshot_id"), index=True)
+    document_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    download_status: Mapped[str] = mapped_column(String(32), nullable=False, default="DISCOVERED", index=True)
+    parse_status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    parse_error: Mapped[str | None] = mapped_column(Text)
+    discovered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+    downloaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+
+
+class CandidateFact(Base):
+    __tablename__ = "candidate_facts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    field_name: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    value: Mapped[str | None] = mapped_column(Text)
+    normalized_value: Mapped[str | None] = mapped_column(Text)
+    raw_value: Mapped[str | None] = mapped_column(Text)
+    evidence_id: Mapped[int | None] = mapped_column(ForeignKey("evidence.id"), index=True)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    source_level: Mapped[str | None] = mapped_column(String(8), index=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
+
+
+class SourcePivot(Base):
+    __tablename__ = "source_pivots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    candidate_id: Mapped[str] = mapped_column(ForeignKey("candidates.candidate_id"), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    entity_value: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    source_id: Mapped[str | None] = mapped_column(ForeignKey("sources.source_id"), index=True)
+    discovered_url: Mapped[str | None] = mapped_column(Text)
+    domain: Mapped[str | None] = mapped_column(String(256), index=True)
+    strategy: Mapped[str | None] = mapped_column(String(64))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DISCOVERED", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_shanghai, nullable=False)
 
 
 class SearchSessionProject(Base):
@@ -503,6 +737,7 @@ class SearchSessionProject(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("search_sessions.session_id"), nullable=False, index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.project_id"), nullable=False, index=True)
+    candidate_id: Mapped[str | None] = mapped_column(ForeignKey("candidates.candidate_id"), index=True)
     announcement_id: Mapped[int | None] = mapped_column(ForeignKey("announcements.id"), index=True)
     found_via: Mapped[str | None] = mapped_column(String(64))
     match_score: Mapped[float | None] = mapped_column(Float)
@@ -512,6 +747,13 @@ class SearchSessionProject(Base):
     is_new: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_updated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_reopened: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    relevance_class: Mapped[str | None] = mapped_column(String(32), index=True)
+    verification_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    enrichment_state: Mapped[str | None] = mapped_column(String(32), index=True)
+    blocker: Mapped[str | None] = mapped_column(String(64), index=True)
+    next_action: Mapped[str | None] = mapped_column(Text)
+    result_bucket: Mapped[str | None] = mapped_column(String(8), index=True)
+    match_type: Mapped[str | None] = mapped_column(String(32), index=True)
 
 
 class CodexReviewItem(Base):
@@ -562,6 +804,12 @@ __all__ = [
     "Announcement",
     "Attachment",
     "Base",
+    "Candidate",
+    "CandidateAttachment",
+    "CandidateEnrichmentQuery",
+    "CandidateEnrichmentResult",
+    "CandidateFact",
+    "CandidateSource",
     "CrawlError",
     "CrawlRun",
     "ChangeHistory",
@@ -583,6 +831,7 @@ __all__ = [
     "FieldConflict",
     "SearchSession",
     "SearchSessionProject",
+    "SourcePivot",
     "CodexReviewItem",
     "SearchTemplate",
     "SystemMetadata",

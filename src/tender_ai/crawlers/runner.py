@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
@@ -15,8 +16,8 @@ from tender_ai.config_loader import APP_ROOT, SearchProfile, load_industry_profi
 from tender_ai.crawlers.http import HttpFetchError, sha256_bytes
 from tender_ai.documents.download import download_attachment
 from tender_ai.sources.contracts import DetailPayload, RawListingItem
-from tender_ai.sources.browser_profiles import browser_profile_path
-from tender_ai.sources.registry import SourceDefinition, SourceRegistry
+from tender_ai.sources.browser_profiles import DEFAULT_BROWSER, browser_profile_path
+from tender_ai.sources.registry import SourceDefinition, SourceRegistry, configured_manual_action, configured_manual_http_status
 from tender_ai.status.metadata import describe_time
 from tender_ai.status.time import as_shanghai, now_shanghai
 from tender_ai.storage.database import create_engine_for, initialize_database, refresh_tender_fts, session_scope
@@ -67,6 +68,13 @@ class SourceCrawlSummary:
     query_count: int = 0
     last_http_status: int | None = None
     error: str | None = None
+    manual_action_required: bool = False
+    manual_action_type: str | None = None
+    manual_action_url: str | None = None
+    manual_action_instructions: str | None = None
+    manual_action_status: str | None = None
+    browser_profile_path: str | None = None
+    manual_browser: str = DEFAULT_BROWSER
 
 
 @dataclass
@@ -108,6 +116,7 @@ class CrawlSummary:
 def _source_payload(definition: SourceDefinition) -> dict[str, Any]:
     payload = {key: value for key, value in definition.model_dump().items() if key in SOURCE_FIELDS}
     payload["browser_profile_path"] = definition.browser_profile_path or str(browser_profile_path(definition.source_id))
+    payload["manual_browser"] = DEFAULT_BROWSER
     return payload
 
 
@@ -165,8 +174,13 @@ def _upsert_discovered_domain(session: Any, url: str, source_level: str | None, 
 
 def _health_reason(error: BaseException) -> str:
     message = str(error).casefold()
+    explicit_reason = getattr(error, "health_reason", None)
+    if explicit_reason:
+        return str(explicit_reason)
     if any(token in message for token in ("验证码", "captcha")):
         return "CAPTCHA"
+    if getattr(error, "manual_action_required", False):
+        return str(getattr(error, "manual_action_type", None) or "VERIFICATION_REQUIRED")
     if isinstance(error, HttpFetchError):
         if error.status_code in {403, 429} or "rate" in message:
             return "RATE_LIMITED"
@@ -174,6 +188,60 @@ def _health_reason(error: BaseException) -> str:
     if any(token in message for token in ("selector", "解析", "json")):
         return "PARSER_ERROR"
     return "HTTP_ERROR"
+
+
+MANUAL_ACTION_REASONS = {"LOGIN_REQUIRED", "LOGIN_EXPIRED", "CAPTCHA", "VERIFICATION_REQUIRED"}
+
+
+def _manual_action_instructions(action_type: str | None) -> str:
+    action = action_type or "MANUAL_ACTION_REQUIRED"
+    if action in {"LOGIN_REQUIRED", "LOGIN_EXPIRED"}:
+        return "请使用 Microsoft Edge 打开该来源，并在该来源的独立浏览器 Profile 中完成登录；不要把账号密码写入项目配置。"
+    if action == "CAPTCHA":
+        return "请使用 Microsoft Edge 打开该来源页面完成人机验证或验证码；系统不会绕过验证。"
+    return "请使用 Microsoft Edge 打开该来源页面完成浏览器安全检测或人工验证；完成后回复“已完成人工验证”，再定向重试该来源。"
+
+
+def _record_source_error(summary: SourceCrawlSummary, error: BaseException) -> None:
+    """把需要人工处理的验证/登录错误显式传到 CLI、报告和来源健康状态。"""
+
+    reason = _health_reason(error)
+    summary.health_reason = reason
+    status_code = getattr(error, "status_code", None)
+    if status_code is not None:
+        summary.last_http_status = int(status_code)
+    action_type = getattr(error, "manual_action_type", None) or (reason if reason in MANUAL_ACTION_REASONS else None)
+    if getattr(error, "manual_action_required", False) or action_type:
+        summary.manual_action_required = True
+        summary.manual_action_type = str(action_type or "MANUAL_ACTION_REQUIRED")
+        summary.manual_action_url = getattr(error, "url", None) or summary.manual_action_url
+        summary.manual_action_instructions = _manual_action_instructions(summary.manual_action_type)
+        summary.manual_action_status = "PENDING_USER"
+        summary.error = f"{str(error)[:850]}；需要人工处理：{summary.manual_action_type}"
+    else:
+        summary.error = str(error)[:1000]
+
+
+def _emit_manual_action_alert(summary: SourceCrawlSummary) -> None:
+    """命中登录、验证码或浏览器验证时立即通知 CLI 调用者。
+
+    使用 stderr，避免破坏 CLI 的 JSON stdout；同一来源在一个运行中只提醒一次。
+    """
+
+    if not summary.manual_action_required or getattr(summary, "_manual_alert_emitted", False):
+        return
+    setattr(summary, "_manual_alert_emitted", True)
+    action = summary.manual_action_type or "MANUAL_ACTION_REQUIRED"
+    lines = [
+        f"[AI-Tender][人工处理提醒] {summary.source_name} ({summary.source_id})：{action}",
+        f"HTTP {summary.last_http_status or '未知'}；{summary.error or '来源要求人工处理'}",
+        f"打开地址：{summary.manual_action_url or '未提供'}",
+        f"人工验证浏览器：{summary.manual_browser}",
+        f"独立浏览器 Profile：{summary.browser_profile_path or '未提供'}",
+        f"操作说明：{summary.manual_action_instructions or _manual_action_instructions(action)}",
+        "完成后请在当前 Codex 对话回复“已完成人工验证”；随后只重试该来源，不重复扫描其他来源。",
+    ]
+    print("\n".join(lines), file=sys.stderr, flush=True)
 
 
 class CrawlRunner:
@@ -236,7 +304,12 @@ class CrawlRunner:
     ) -> None:
         try:
             payload = adapter.fetch_detail(item.url)
-        except Exception:
+        except Exception as exc:
+            # 详情页的 412/验证码不能被降级成“列表摘要成功”。保留列表兜底，
+            # 但必须把人工动作、URL 和 HTTP 状态传给来源健康报告。
+            summary.failures += 1
+            _record_source_error(summary, exc)
+            _emit_manual_action_alert(summary)
             payload = None
         if payload is None or not isinstance(payload, DetailPayload):
             payload = _fallback_payload(item)
@@ -319,14 +392,15 @@ class CrawlRunner:
                 links = adapter.fetch_attachments(payload)
             except Exception as exc:
                 links = []
-                summary.health_reason = _health_reason(exc)
+                _record_source_error(summary, exc)
+                _emit_manual_action_alert(summary)
             for link in links[:5]:
                 try:
                     downloaded = download_attachment(adapter.http, link.url, suggested_name=link.file_name, mime_type=link.mime_type, cache=adapter.cache)
                 except Exception as exc:
                     summary.failures += 1
-                    summary.health_reason = _health_reason(exc)
-                    summary.error = str(exc)[:1000]
+                    _record_source_error(summary, exc)
+                    _emit_manual_action_alert(summary)
                     continue
                 existing_attachment = next((pending for pending in session.new if isinstance(pending, Attachment) and pending.project_id == record.project_id and pending.content_hash == downloaded.content_hash), None)
                 if existing_attachment is None:
@@ -397,10 +471,33 @@ class CrawlRunner:
             for definition in definitions:
                 source_row = session.get(Source, definition.source_id)
                 source_summary = SourceCrawlSummary(definition.source_id, definition.source_name)
+                source_summary.browser_profile_path = definition.browser_profile_path or str(browser_profile_path(definition.source_id))
                 summary.sources.append(source_summary)
                 if not definition.enabled or not definition.crawl_enabled:
                     source_summary.status = "DISABLED"
                     source_summary.health_reason = "NO_RESULTS_EXPECTED"
+                    continue
+                configured_action = configured_manual_action(definition)
+                if configured_action:
+                    source_summary.status = "NEEDS_ATTENTION"
+                    source_summary.health_reason = configured_action
+                    source_summary.manual_action_required = True
+                    source_summary.manual_action_type = configured_action
+                    source_summary.manual_action_url = definition.base_url
+                    source_summary.last_http_status = configured_manual_http_status(definition)
+                    source_summary.manual_action_instructions = _manual_action_instructions(configured_action)
+                    source_summary.manual_action_status = "PENDING_USER"
+                    source_summary.failures = 1
+                    source_summary.error = "来源配置要求人工处理；请在该来源的独立浏览器 Profile 中完成登录、检测或验证后再重试"
+                    _emit_manual_action_alert(source_summary)
+                    source_row.runtime_status = source_summary.status
+                    source_row.health_reason = source_summary.health_reason
+                    source_row.last_health_at = now_shanghai()
+                    source_row.last_failure_at = now_shanghai()
+                    source_row.failure_count = (source_row.failure_count or 0) + 1
+                    source_row.consecutive_failures = (source_row.consecutive_failures or 0) + 1
+                    source_row.last_error = source_summary.error
+                    summary.total_failures += 1
                     continue
                 previous_items = source_row.items_found if source_row else 0
                 crawl_run = CrawlRun(source_id=definition.source_id, profile_id=profile.profile_id, status="RUNNING")
@@ -418,6 +515,8 @@ class CrawlRunner:
                     seen_urls: set[str] = set()
                     item_budget = max(1, max_items)
                     for query in effective_terms:
+                        if source_summary.manual_action_required:
+                            break
                         if source_summary.items_found >= item_budget:
                             break
                         source_summary.query_count += 1
@@ -435,14 +534,16 @@ class CrawlRunner:
                             query_row.last_error = None
                         except Exception as exc:
                             source_summary.failures += 1
-                            source_summary.health_reason = _health_reason(exc)
-                            source_summary.error = str(exc)[:1000]
+                            _record_source_error(source_summary, exc)
                             crawl_run.error_count += 1
                             query_row = session.scalar(select(SearchQuery).where(SearchQuery.query_text == query, SearchQuery.source_id == definition.source_id, SearchQuery.profile_id == profile.profile_id))
                             if query_row is not None:
                                 query_row.last_run_at = now_shanghai()
                                 query_row.last_error = str(exc)[:1000]
                             session.add(CrawlError(crawl_run_id=crawl_run.id, source_id=definition.source_id, error_type=type(exc).__name__, error_message=str(exc)[:4000], retryable=isinstance(exc, HttpFetchError), occurred_at=now_shanghai()))
+                            if source_summary.manual_action_required:
+                                _emit_manual_action_alert(source_summary)
+                                break
                             continue
                         for item in items:
                             if source_summary.items_found >= item_budget:
@@ -469,15 +570,19 @@ class CrawlRunner:
                                 )
                             except Exception as exc:
                                 source_summary.failures += 1
-                                source_summary.health_reason = _health_reason(exc)
-                                source_summary.error = str(exc)[:1000]
+                                _record_source_error(source_summary, exc)
                                 crawl_run.error_count += 1
                                 crawl_run.items_failed += 1
                                 session.add(CrawlError(crawl_run_id=crawl_run.id, source_id=definition.source_id, url=item.url, error_type=type(exc).__name__, error_message=str(exc)[:4000], retryable=False, occurred_at=now_shanghai()))
+                                if source_summary.manual_action_required:
+                                    _emit_manual_action_alert(source_summary)
+                                    break
                             if definition.request_delay_seconds:
                                 time.sleep(definition.request_delay_seconds)
-                    source_summary.last_http_status = getattr(getattr(adapter, "http", None), "last_success_status", None) or getattr(getattr(adapter, "http", None), "last_status", None)
-                    if definition.status == "NEEDS_ATTENTION" or source_summary.health_reason == "CAPTCHA":
+                    # last_status 表示最近一次请求；不能用 last_success_status 优先，
+                    # 否则列表 200 后详情 412 会被错误报告成 200。
+                    source_summary.last_http_status = getattr(getattr(adapter, "http", None), "last_status", None) or getattr(getattr(adapter, "http", None), "last_success_status", None)
+                    if definition.status == "NEEDS_ATTENTION" or source_summary.manual_action_required or source_summary.health_reason == "CAPTCHA":
                         source_summary.status = "NEEDS_ATTENTION"
                     elif source_summary.failures:
                         source_summary.status = "DEGRADED"
@@ -505,10 +610,10 @@ class CrawlRunner:
                     crawl_run.status = source_summary.status
                 except Exception as exc:
                     source_summary.failures += 1
-                    source_summary.status = "NEEDS_ATTENTION" if definition.status == "NEEDS_ATTENTION" else "DEGRADED"
-                    source_summary.health_reason = _health_reason(exc)
-                    source_summary.error = str(exc)[:1000]
-                    source_summary.last_http_status = getattr(getattr(adapter, "http", None), "last_success_status", None) or getattr(getattr(adapter, "http", None), "last_status", None)
+                    _record_source_error(source_summary, exc)
+                    source_summary.status = "NEEDS_ATTENTION" if definition.status == "NEEDS_ATTENTION" or source_summary.manual_action_required else "DEGRADED"
+                    source_summary.last_http_status = getattr(getattr(adapter, "http", None), "last_status", None) or getattr(getattr(adapter, "http", None), "last_success_status", None)
+                    _emit_manual_action_alert(source_summary)
                     source_row.runtime_status = source_summary.status
                     source_row.health_reason = source_summary.health_reason
                     source_row.last_health_at = now_shanghai()
@@ -563,11 +668,22 @@ class CrawlRunner:
             "",
             "## 来源状态",
             "",
-            "| source_id | 状态 | 健康原因 | 抓取数 | 新增 | 变化 | 失败 | 附件 | HTTP | 错误 |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---|",
+            "| source_id | 状态 | 健康原因 | 人工处理 | 抓取数 | 新增 | 变化 | 失败 | 附件 | HTTP | 错误 |",
+            "|---|---|---|---|---:|---:|---:|---:|---:|---:|---|",
         ]
         for item in summary.sources:
-            lines.append(f"| {item.source_id} | {item.status} | {item.health_reason or ''} | {item.items_found} | {item.new_items} | {item.updated_items} | {item.failures} | {item.attachments} | {item.last_http_status or ''} | {(item.error or '').replace('|', '/')[:160]} |")
+            lines.append(f"| {item.source_id} | {item.status} | {item.health_reason or ''} | {item.manual_action_type if item.manual_action_required else ''} | {item.items_found} | {item.new_items} | {item.updated_items} | {item.failures} | {item.attachments} | {item.last_http_status or ''} | {(item.error or '').replace('|', '/')[:160]} |")
+        manual_items = [item for item in summary.sources if item.manual_action_required]
+        if manual_items:
+            lines.extend(["", "## 需要用户人工处理的来源", "", "完成验证后回复“已完成人工验证”，再只定向重试对应来源：", ""])
+            for item in manual_items:
+                lines.extend([
+                    f"- {item.source_name}（{item.source_id}）：{item.manual_action_type or item.health_reason or 'MANUAL_ACTION_REQUIRED'}，HTTP {item.last_http_status or '未知'}",
+                    f"  - 人工验证浏览器：{item.manual_browser}",
+                    f"  - 打开地址：{item.manual_action_url or '未提供'}",
+                    f"  - 独立 Profile：{item.browser_profile_path or '未提供'}",
+                    f"  - 操作说明：{item.manual_action_instructions or '请完成人工登录、验证码或安全验证'}",
+                ])
         lines.extend([
             "", "## 架构优化完成情况", "",
             "| 项目 | 状态 | 说明 |", "|---|---|---|",

@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from tender_ai.config_loader import APP_ROOT
 from tender_ai.status.time import as_shanghai, now_shanghai
+from tender_ai.status.engine import STATUS_CRITICAL_FIELDS, evidence_strength
 from tender_ai.storage.models import (
     Announcement,
     Attachment,
@@ -64,11 +65,13 @@ def review_reasons(
     *,
     document_rows: Iterable[DocumentParse] = (),
     conflict_rows: Iterable[FieldConflict] = (),
+    evidence_rows: Iterable[Evidence] = (),
     now: datetime | None = None,
 ) -> tuple[str, ...]:
     reasons: list[str] = []
     conflicts = list(conflict_rows)
     documents = list(document_rows)
+    evidence = list(evidence_rows)
     if any(row.field_name == "project_identity" for row in conflicts):
         reasons.append("PROBABLE_MATCH")
     if any(row.field_name != "project_identity" for row in conflicts) or project.status_reason == "UNKNOWN_CONFLICTING_DATES":
@@ -85,6 +88,14 @@ def review_reasons(
             getattr(project, field_name, None) for field_name in ("registration_deadline", "document_deadline")
         ):
             reasons.append("UNKNOWN_PARTICIPATION_RULE")
+    critical_without_evidence = [
+        field_name
+        for field_name in STATUS_CRITICAL_FIELDS
+        if getattr(project, field_name, None) is not None
+        and not any(row.field_name == field_name and evidence_strength(row) == "STRONG" for row in evidence)
+    ]
+    if critical_without_evidence:
+        reasons.append("MISSING_CRITICAL_EVIDENCE")
     if (project.source_level or "").upper() in {"D", "E"}:
         reasons.append("ONLY_SECONDARY_SOURCE")
     if project.status == "OPEN" and not any(
@@ -151,6 +162,11 @@ def _candidate_values(session: Any, project: Project, reasons: tuple[str, ...], 
         "review_reasons": list(reasons),
         "conflicts": conflicts,
         "evidence_ids": evidence_ids,
+        "missing_evidence_fields": [
+            field_name for field_name in STATUS_CRITICAL_FIELDS
+            if getattr(project, field_name, None) is not None
+            and not any(row.field_name == field_name and evidence_strength(row) == "STRONG" for row in session.scalars(select(Evidence).where(Evidence.project_id == project.project_id)).all())
+        ],
     }
 
 
@@ -163,7 +179,11 @@ def ensure_review_item(
 ) -> CodexReviewItem | None:
     documents = _document_rows(session, project, announcement)
     conflicts = list(session.scalars(select(FieldConflict).where(FieldConflict.project_id == project.project_id, FieldConflict.resolution_status == "PENDING")).all())
-    reasons = review_reasons(project, document_rows=documents, conflict_rows=conflicts)
+    evidence_query = select(Evidence).where(Evidence.project_id == project.project_id)
+    if announcement is not None:
+        evidence_query = evidence_query.where(Evidence.announcement_id == announcement.id)
+    evidence_rows = list(session.scalars(evidence_query).all())
+    reasons = review_reasons(project, document_rows=documents, conflict_rows=conflicts, evidence_rows=evidence_rows)
     if not reasons:
         project.needs_codex_review = False
         project.review_reason = None
@@ -284,7 +304,7 @@ def review_item_dict(session: Any, item: CodexReviewItem) -> dict[str, Any]:
 
 def write_review_files(session: Any, session_id: str, *, project_ids: Iterable[str] | None = None) -> tuple[Path, Path, list[dict[str, Any]]]:
     statement = select(CodexReviewItem).where(CodexReviewItem.search_session_id == session_id).order_by(CodexReviewItem.priority, CodexReviewItem.created_at)
-    if project_ids:
+    if project_ids is not None:
         statement = statement.where(CodexReviewItem.project_id.in_(list(project_ids)))
     items = [review_item_dict(session, item) for item in session.scalars(statement).all()]
     search_session = session.get(SearchSession, session_id)

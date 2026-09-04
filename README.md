@@ -17,6 +17,8 @@ D:\AI-Tender.venv\Scripts\python.exe -m tender_ai codex-search --region 内蒙�
 
 通常不需要用户手工记命令。给 Codex 的完整工作流见 [D:\AI-Tender\CODEX_SEARCH_GUIDE.md](D:\AI-Tender\CODEX_SEARCH_GUIDE.md)。
 
+当前系统状态入口：[D:\AI-Tender\CURRENT_STATUS.md](D:\AI-Tender\CURRENT_STATUS.md)。
+
 ## CLI
 
 ```powershell
@@ -79,8 +81,19 @@ Web 是数据浏览器和配置控制台，不是聊天机器人，包含：
 - Search Profile：`config\search_profiles.yaml`
 - 行业关键词组：`config\industry_profiles.yaml`
 - Generic Adapter：`config\source_adapters\`
+- 当前状态与验证报告：`D:\AI-Tender\CURRENT_STATUS.md`、`D:\AI-Tender\ARCHITECTURE_REPORT.md`
+
+来源注册表还登记法定平台、地方官方来源家族和能源央企/电建电网采购平台，包括军队采购网、央采网、中直机关采购网、政采云、税务采购网、各级公共资源与政府采购站点、交通/水利招投标平台、国企阳光采购平台、发电集团采购平台、国网 ECP、南网、中石油、中石化和中海油等。全国海量省市区县子站点通过总站目录或 Discovery 发现，`registry_only` / `CATALOG` 只表示已登记，不表示已经逐站接入。
+
+深度搜索或显式 `--wechat` 会使用 `weixin_public_index` 查询公开索引中的微信公众号文章。任何登录、验证码、人机检测、JavaScript 验证或 HTTP 412 验证会立即通过 CLI stderr 提醒，并在结果文件标记人工动作和未覆盖来源。
+
+二手网站和公众号只作为线索：系统会用项目名称、项目/招标编号、招标人和代理机构执行有限官方追源；有官方命中时结果优先使用官方链接，未命中时保留二手出处并标注“官方公告未找到/待核验”。
 
 每次搜索输出 `summary.md`、`results.json`、`open_projects.json`、`unknown_projects.json`、`codex_review.md`、`codex_review.json`、`errors.json` 和 `sources.json`。
+
+每次搜索同时输出统一可读报告 `output\sessions\<session_id>\search_report.md`。对外回答搜索结果时，必须把官方来源、二手来源、来源等级、截止时间、状态、未覆盖来源和核验限制整理进这份文档，并向用户提供文档路径；JSON文件保留给Codex和程序继续处理。
+
+重复执行相同搜索时，系统会自动隐藏上次已经报告且没有内容、状态、公告或来源变化的项目，只输出新增、更新、延期重开和新发现来源；被隐藏项目仍保留在数据库和历史 Session 中，并在结果文件记录忽略数量。来源遇到登录、验证码或 JavaScript 验证（包括带验证页特征的 HTTP 412）时，会标记 `NEEDS_ATTENTION` 和 `manual_action_required`，明确提示人工处理，不伪装成无结果。
 
 ## 架构边界
 

@@ -28,6 +28,9 @@ PROJECT_FIELDS = {
     "raw_project_name", "canonical_project_name", "field_confidence", "source_confidence",
     "project_match_confidence", "overall_confidence", "completeness_score", "needs_codex_review",
     "review_reason", "status_rule_version",
+    "tender_status", "relevance_class", "verification_status", "enrichment_state", "blocker", "next_action",
+    "identity_status", "identity_confidence", "relation_types_json", "matched_concepts_json", "missing_fields_json",
+    "project_location", "tenderer_location", "agency_location", "source_location", "rank_score",
 }
 DEADLINE_FIELDS = {"qualification_deadline", "registration_deadline", "document_deadline", "bid_deadline", "open_time"}
 CHANGE_TYPES = {"original", "extension", "clarification", "change", "correction", "supplement"}
@@ -102,6 +105,7 @@ def save_tender_record(session: Session, record: TenderRecord, *, status_reason:
         project.updated_at = now_shanghai()
     if "status" not in manual_fields:
         project.status_reason = record.status_reason or status_reason or project.status_reason or "UNKNOWN_NO_PARTICIPATION_DEADLINE"
+    project.tender_status = project.status
     project.status_evaluated_at = record.status_evaluated_at or now_shanghai()
     session.flush()
     if old_status != project.status:
@@ -124,11 +128,19 @@ def project_to_record(project: Project) -> TenderRecord:
     return TenderRecord(**payload)
 
 
-def save_evidence(session: Session, evidence: EvidenceRecord, *, project_id: str | None = None, announcement_id: int | None = None) -> Evidence:
+def save_evidence(
+    session: Session,
+    evidence: EvidenceRecord,
+    *,
+    project_id: str | None = None,
+    announcement_id: int | None = None,
+    candidate_id: str | None = None,
+) -> Evidence:
     content_hash = evidence.content_hash or ""
     existing_query = select(Evidence).where(
         Evidence.project_id == project_id,
         Evidence.announcement_id == announcement_id,
+        Evidence.candidate_id == candidate_id,
         Evidence.field_name == evidence.field_name,
         Evidence.source_url == evidence.source_url,
         Evidence.source_text == evidence.source_text,
@@ -155,6 +167,7 @@ def save_evidence(session: Session, evidence: EvidenceRecord, *, project_id: str
     row = Evidence(
         project_id=project_id,
         announcement_id=announcement_id,
+        candidate_id=candidate_id,
         field_name=evidence.field_name,
         normalized_value=evidence.normalized_value,
         raw_value=evidence.raw_value,
